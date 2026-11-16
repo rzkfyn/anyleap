@@ -123,4 +123,15 @@ Single-PC check that QUIC-injected keys reach a focused Win32 `EDIT` control on 
 - [ ] **Keyboard, modifiers & shortcuts:** Typing text, arrow keys, `Return`, `Backspace`, `Delete` (`Fn+Backspace`), `CapsLock`, and 1:1 shortcuts (`Command+C`/`Command+V` → `Win` or Mac `Command`, `Option+Tab` → `Alt+Tab`, `Control+C` → `Ctrl+C`, holding Left/Right `Shift`) works with zero stuck keys after returning.
 - [ ] **Emergency release & CursorReturn:** Pressing `Control+Option+Esc` immediately releases trap, restores the local cursor, clears remote modifiers, and updates UI; returning across the Linked PC seam warps the macOS cursor cleanly back to the matching edge coordinate `(rx, ry)`.
 
+---
+
+## H. Linux / CachyOS Hyprland Linked PC (SPEC-30) — needs macOS/Windows Main PC + Linux Linked PC
+
+- [ ] **Linux CI / build check:** Running `cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked` on CachyOS/Ubuntu passes with zero new system `-dev` headers beyond Tauri's baseline dependencies.
+- [ ] **Discovery & Wayland `xdg_output` layout (Hyprland):** Enabling **Allow other PCs to control this PC** on CachyOS/Hyprland advertises the host's short computer name (not `"AnyLeap-PC"`), triggers **zero** permission dialogs, and enumerates active monitors (including negative offsets / HiDPI fractional scaling) accurately in `TopologyCanvas`.
+- [ ] **Multi-monitor pointer & seam return:** Moving from macOS/Windows Main PC across the seam enters at matching logical `(x, y)` on Hyprland, glides smoothly across multiple Hyprland displays, and triggers `CursorReturn` cleanly back to the Main PC along the exact seam boundary (`SoftCursorTracker`).
+- [ ] **Clicks, drags & scroll direction:** Left/right/middle clicks, window dragging (`LeftMouse` hold), and mouse/trackpad scroll wheel scroll in the natural/expected direction (Wayland inverted vs Win32 sign) at normal speed without acceleration stalls.
+- [ ] **Keyboard, XKB modifiers & Hyprland shortcuts:** Typing text (`evdev` keycodes), holding `Shift`, tapping `CapsLock` twice, and using `Super` (`Command`/`Win`) + window manager binds (`Super+Return`, `Super+Q`, `Ctrl+C`/`Ctrl+V`) work cleanly with zero `EMFILE` FD leaks and zero stuck modifiers after `CursorReturn`.
+- [ ] **GNOME/KDE Portal fallback & X11 fallback:** On a non-wlroots Wayland desktop (`xdg-desktop-portal` RemoteDesktop + EIS), one-time approval persists via `kvm_wayland_portal_token.txt`; on X11 (`DISPLAY`), `randr` layout and `xtest` pointer/button/wheel/key injection operate cleanly.
+
 

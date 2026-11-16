@@ -28,7 +28,7 @@ AnyLeap connects your Android phone and Windows PCs over USB or local Wi-Fi in a
 - **USB & Wireless Pairing** — Plug in over USB or pair wirelessly via QR code or 6-digit mDNS pairing code with saved devices and live battery telemetry.
 
 ### Shared Mouse & Keyboard
-- **Main PC & Linked PC Roles (`Computers` tab)** — Clear role model: the **Main PC** (Windows, or macOS via `SPEC-29` `CGEventTap` adapters) shares its physical mouse and keyboard; a **Linked PC** (Windows, or macOS via `SPEC-28` Accessibility-backed input/display adapters) opts in via **Allow other PCs to control this PC**.
+- **Main PC & Linked PC Roles (`Computers` tab)** — Clear role model: the **Main PC** (Windows, or macOS via `SPEC-29` `CGEventTap` adapters) shares its physical mouse and keyboard; a **Linked PC** (Windows, macOS via `SPEC-28` Accessibility-backed adapters, or Linux via `SPEC-30` Wayland Hyprland/wlroots, XDG Portal+EIS, or X11 adapters) opts in via **Allow other PCs to control this PC**.
 - **Encrypted QUIC Link** — Mutually authenticated QUIC transport (UDP 4177) with unreliable datagrams for low-latency pointer motion and audio, plus separate unidirectional streams for clipboard text/images and file transfers.
 - **One-Time Pairing Code & Fingerprint Trust** — First link verifies a 6-digit **Pairing code**; subsequent links authenticate automatically by pinned SHA-256 certificate fingerprint (revoke anytime with **Forget**).
 - **Offset-Aware 2D Layout** — Multi-monitor canvas to position the Linked PC along any screen edge (`left`, `right`, `top`, `bottom`) with pixel-offset alignment, edge deadzone/dwell tuning, and instant cursor release (`Scroll Lock`, `Pause`, `Ctrl+Alt+Esc` / `Ctrl+Option+Esc` on macOS, or **Bring cursor back**).
@@ -48,9 +48,9 @@ AnyLeap connects your Android phone and Windows PCs over USB or local Wi-Fi in a
 
 ## Requirements
 
-- **PC:** Windows 10 or Windows 11 (x64) with Microsoft Edge WebView2 Runtime (preinstalled on Windows 11 and most Windows 10 systems); macOS builds from source can run Android mirroring (external scrcpy window) and act as either a **Main PC** (`SPEC-29`) or **Linked PC** (`SPEC-28`, requiring **Privacy & Security → Accessibility** and **Input Monitoring** for Main PC).
+- **PC:** Windows 10 or Windows 11 (x64) with Microsoft Edge WebView2 Runtime (preinstalled on Windows 11 and most Windows 10 systems); macOS builds from source can run Android mirroring (external scrcpy window) and act as either a **Main PC** (`SPEC-29`) or **Linked PC** (`SPEC-28`, requiring **Privacy & Security → Accessibility** and **Input Monitoring** for Main PC); Linux source builds can act as a **Linked PC** (`SPEC-30`) on Wayland (CachyOS/Hyprland/wlroots native protocols with zero prompts, or GNOME/KDE via XDG `RemoteDesktop` Portal + EIS) and X11.
 - **Android:** Phone with **USB debugging** enabled (Android 11+ recommended for wireless QR/pairing-code setup and audio forwarding).
-- **Shared Mouse & Keyboard:** Two PCs running AnyLeap on the same local network (Windows or macOS Main PC ↔ Windows or macOS Linked PC; UDP 4177 for QUIC, UDP 4179 for LAN discovery).
+- **Shared Mouse & Keyboard:** Two PCs running AnyLeap on the same local network (Windows or macOS Main PC ↔ Windows, macOS, or Linux Linked PC; UDP 4177 for QUIC, UDP 4179 for LAN discovery).
 
 ## Install
 

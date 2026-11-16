@@ -1885,6 +1885,16 @@ async fn start_server_inner(
             "Accessibility permission is required to receive remote mouse and keyboard input. Enable AnyLeap in System Settings → Privacy & Security → Accessibility.",
         );
     }
+    #[cfg(target_os = "linux")]
+    {
+        let data_dir = app_handle
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        if let Err(err) = injector::prepare_linux_remote_control(&data_dir) {
+            emit_continuity_notice(app_handle, &linux_remote_control_error_notice(&err));
+        }
+    }
     let port = server_handle.port;
     let mut rx = server_handle.incoming_tx.subscribe();
     let mut transfer_rx = server_handle.transfer_tx.subscribe();
@@ -3646,6 +3656,17 @@ fn controller_start_failure_notice(is_macos: bool) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_remote_control_error_notice(err: &str) -> String {
+    let trimmed = err.trim();
+    if trimmed.is_empty() {
+        "Linux remote input could not be initialized. Check Wayland/Portal or X11 permissions."
+            .to_string()
+    } else {
+        format!("Linux remote input setup failed: {trimmed}")
+    }
+}
+
 #[tauri::command]
 pub async fn kvm_update_topology(
     topology: TopologyConfig,
@@ -4436,5 +4457,15 @@ mod tests {
         assert!(mac_msg.contains("Input Monitoring"));
         let other_msg = controller_start_failure_notice(false);
         assert!(other_msg.contains("not supported"));
+    }
+
+    #[test]
+    fn linux_remote_control_error_notice_formats_specific_and_empty_errors() {
+        assert_eq!(
+            linux_remote_control_error_notice("  Wayland portal denied "),
+            "Linux remote input setup failed: Wayland portal denied"
+        );
+        let fallback = linux_remote_control_error_notice("   ");
+        assert!(fallback.contains("Wayland/Portal or X11"));
     }
 }
