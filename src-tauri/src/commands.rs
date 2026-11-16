@@ -149,30 +149,43 @@ pub(crate) fn adb_cmd(app: &AppHandle) -> Result<tauri_plugin_shell::process::Co
         .map_err(|e| e.to_string())
 }
 
+/// Candidate fallback paths for `scrcpy-server` relative to the executable directory.
+fn server_path_candidates(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    vec![
+        dir.join("scrcpy-server"),
+        dir.join("resources").join("scrcpy-server"),
+        dir.join("scrcpy").join("scrcpy-server"),
+        // macOS .app bundle Contents/MacOS -> Contents/Resources
+        dir.join("..")
+            .join("Resources")
+            .join("resources")
+            .join("scrcpy-server"),
+        dir.join("..")
+            .join("Resources")
+            .join("scrcpy")
+            .join("scrcpy-server"),
+        // dev: src-tauri/target/debug -> src-tauri/binaries/scrcpy-server
+        dir.join("..")
+            .join("..")
+            .join("binaries")
+            .join("scrcpy-server"),
+    ]
+}
+
 /// Locate the scrcpy-server jar across production (bundled resource) and dev layouts.
 fn resolve_server_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    // Production: bundled as a resource under scrcpy/.
-    if let Ok(p) = app
-        .path()
-        .resolve("scrcpy/scrcpy-server", BaseDirectory::Resource)
-    {
-        if p.exists() {
-            return Some(p);
+    // Production: bundled as a resource under resources/ (with legacy scrcpy/ fallback).
+    for rel in ["resources/scrcpy-server", "scrcpy/scrcpy-server"] {
+        if let Ok(p) = app.path().resolve(rel, BaseDirectory::Resource) {
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
     // Dev / fallback: relative to the executable.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidates = [
-                dir.join("scrcpy-server"),
-                dir.join("scrcpy").join("scrcpy-server"),
-                // dev: src-tauri/target/debug -> src-tauri/binaries/scrcpy-server
-                dir.join("..")
-                    .join("..")
-                    .join("binaries")
-                    .join("scrcpy-server"),
-            ];
-            for cand in candidates {
+            for cand in server_path_candidates(dir) {
                 if cand.exists() {
                     return Some(cand);
                 }
@@ -626,7 +639,7 @@ fn note_virtual_display(
 /// Build a base scrcpy sidecar command with pinned environment.
 fn scrcpy_cmd(app: &AppHandle) -> Result<tauri_plugin_shell::process::Command, String> {
     let server = resolve_server_path(app)
-        .ok_or_else(|| "scrcpy-server not found (run scripts/fetch-binaries.ps1)".to_string())?;
+        .ok_or_else(|| "scrcpy-server not found (run npm run fetch-binaries)".to_string())?;
     let mut cmd = app
         .shell()
         .sidecar("scrcpy")
@@ -3861,5 +3874,25 @@ mod spec20_tests {
         let restarted_args = restart_screen_off_args(&rec_args, true);
         assert!(restarted_args.contains(&"--turn-screen-off".to_string()));
         assert!(!restarted_args.iter().any(|a| a.starts_with("--record=")));
+    }
+
+    #[test]
+    fn server_path_candidates_cover_bundled_macos_and_dev_layouts() {
+        let dir = std::path::Path::new("/app/Contents/MacOS");
+        let cands = server_path_candidates(dir);
+        assert!(cands.contains(&dir.join("resources").join("scrcpy-server")));
+        assert!(cands.contains(&dir.join("scrcpy").join("scrcpy-server")));
+        assert!(cands.contains(
+            &dir.join("..")
+                .join("Resources")
+                .join("resources")
+                .join("scrcpy-server")
+        ));
+        assert!(cands.contains(
+            &dir.join("..")
+                .join("..")
+                .join("binaries")
+                .join("scrcpy-server")
+        ));
     }
 }
