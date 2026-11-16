@@ -3632,9 +3632,17 @@ fn apply_controller_topology(kvm: &mut KvmState, topology: TopologyConfig, app_h
         {
             emit_continuity_notice(
                 app_handle,
-                "Main PC input capture is not supported on this OS yet. This machine can still act as a Linked PC.",
+                controller_start_failure_notice(cfg!(target_os = "macos")),
             );
         }
+    }
+}
+
+fn controller_start_failure_notice(is_macos: bool) -> &'static str {
+    if is_macos {
+        "Accessibility and Input Monitoring permissions are required to share your mouse & keyboard from macOS. Enable AnyLeap in System Settings → Privacy & Security."
+    } else {
+        "Main PC input capture is not supported on this OS yet. This machine can still act as a Linked PC."
     }
 }
 
@@ -4419,5 +4427,14 @@ mod tests {
             resolve_computer_name_from_sources(None, None, None, None),
             "AnyLeap-PC"
         );
+    }
+
+    #[test]
+    fn controller_start_failure_notice_distinguishes_macos_permissions_from_unsupported_os() {
+        let mac_msg = controller_start_failure_notice(true);
+        assert!(mac_msg.contains("Accessibility"));
+        assert!(mac_msg.contains("Input Monitoring"));
+        let other_msg = controller_start_failure_notice(false);
+        assert!(other_msg.contains("not supported"));
     }
 }

@@ -179,6 +179,8 @@ pub fn restore_cursor_visibility() {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    macos_tap::restore_cursor_direct();
 }
 
 #[cfg(windows)]
@@ -195,6 +197,8 @@ fn notify_hook_thread_restore() {
     restore_cursor_visibility();
     #[cfg(windows)]
     post_hook_thread_message(WM_KVM_RESTORE_CURSOR);
+    #[cfg(target_os = "macos")]
+    macos_tap::signal_restore();
 }
 
 // --- SPEC-25a ---
@@ -241,7 +245,7 @@ fn button_from_mouse_up_msg(msg: u32) -> Option<u8> {
 }
 // --- end SPEC-25a ---
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn compute_trap_center(mx: i32, my: i32, mw: i32, mh: i32) -> (i32, i32) {
     (mx + mw / 2, my + mh / 2)
 }
@@ -264,7 +268,7 @@ fn trapped_mouse_delta(
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn should_perform_engage(hook_active: bool, is_trapped: bool, engage_pending: bool) -> bool {
     hook_active && is_trapped && engage_pending
 }
@@ -391,7 +395,9 @@ impl HookController {
         unsafe {
             let _ = SetCursorPos(rx, ry);
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        macos_tap::schedule_return_warp(rx, ry);
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = (rx, ry);
     }
 
@@ -691,12 +697,17 @@ impl HookController {
             *g = on_leap_blocked;
         }
 
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
-            // Global input capture hooks are not yet implemented outside Windows.
+            // Global input capture hooks are not yet implemented on this OS.
             // Keep HOOK_ACTIVE and HAS_ACTIVE_LINK false so status reflects reality.
             HAS_ACTIVE_LINK.store(false, Ordering::Release);
             false
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            macos_tap::start()
         }
 
         #[cfg(windows)]
@@ -812,10 +823,12 @@ impl HookController {
                 let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
             }
         }
+        #[cfg(target_os = "macos")]
+        macos_tap::stop();
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn disarm_trapped_in_callback() {
     IS_TRAPPED.store(false, Ordering::SeqCst);
     CURSOR_CENTERED.store(false, Ordering::Release);
@@ -1061,6 +1074,28 @@ unsafe fn handle_mouse_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> O
         super::dragdrop::hide_edge_catcher();
     }
 
+    let pt_pair = (pt.x, pt.y);
+    if try_evaluate_edge_leap(pt_pair, |neighbor| unsafe {
+        !MonitorFromPoint(
+            POINT {
+                x: neighbor.0,
+                y: neighbor.1,
+            },
+            MONITOR_DEFAULTTONULL,
+        )
+        .is_invalid()
+    }) {
+        return Some(LRESULT(1));
+    }
+
+    None
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn try_evaluate_edge_leap<F>(pt: (i32, i32), is_neighbor_occupied: F) -> bool
+where
+    F: FnOnce((i32, i32)) -> bool,
+{
     let link_edge = Edge::from_u8(LINK_FROM_EDGE.load(Ordering::Relaxed));
     let deadzone = DEADZONE_PX.load(Ordering::Relaxed);
     let resistance_ms = RESISTANCE_MS.load(Ordering::Relaxed);
@@ -1078,11 +1113,11 @@ unsafe fn handle_mouse_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> O
 
     let hit: Option<EdgeLeapCandidate> = {
         let Ok(layout) = controller_layout().try_lock() else {
-            return None;
+            return false;
         };
         if let Some(origin) = layout.remote_origin {
             detect_controller_edge_seams(
-                (pt.x, pt.y),
+                pt,
                 &layout.main_monitors,
                 &layout.linked_monitors,
                 origin,
@@ -1103,12 +1138,12 @@ unsafe fn handle_mouse_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> O
                 }
             })
         } else {
-            detect_controller_edge((pt.x, pt.y), &layout.main_monitors, link_edge, deadzone).map(
+            detect_controller_edge(pt, &layout.main_monitors, link_edge, deadzone).map(
                 |(idx, _)| {
                     let m = &layout.main_monitors[idx];
                     let clamped = (
-                        pt.x.clamp(m.x, m.x + m.width - 1),
-                        pt.y.clamp(m.y, m.y + m.height - 1),
+                        pt.0.clamp(m.x, m.x + m.width - 1),
+                        pt.1.clamp(m.y, m.y + m.height - 1),
                     );
                     let local_union = ScreenRect {
                         x: LOCAL_UNION_X.load(Ordering::Relaxed),
@@ -1148,33 +1183,27 @@ unsafe fn handle_mouse_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> O
     let Some(cand) = hit else {
         EDGE_DWELL_START.store(0, Ordering::Relaxed);
         EDGE_DWELL_SEAM_IDX.store(-1, Ordering::Relaxed);
-        return None;
+        return false;
     };
 
     // Double-check live OS monitor topology on the adjacent pixel beyond the leap edge
     let neighbor = match cand.leap_side {
         // pt may lie past the screen edge; clamp onto the edge monitor first.
-        Edge::Right => POINT {
-            x: cand.mx + cand.mw,
-            y: pt.y.clamp(cand.my, cand.my + cand.mh - 1),
-        },
-        Edge::Left => POINT {
-            x: cand.mx - 1,
-            y: pt.y.clamp(cand.my, cand.my + cand.mh - 1),
-        },
-        Edge::Top => POINT {
-            x: pt.x.clamp(cand.mx, cand.mx + cand.mw - 1),
-            y: cand.my - 1,
-        },
-        Edge::Bottom => POINT {
-            x: pt.x.clamp(cand.mx, cand.mx + cand.mw - 1),
-            y: cand.my + cand.mh,
-        },
+        Edge::Right => (
+            cand.mx + cand.mw,
+            pt.1.clamp(cand.my, cand.my + cand.mh - 1),
+        ),
+        Edge::Left => (cand.mx - 1, pt.1.clamp(cand.my, cand.my + cand.mh - 1)),
+        Edge::Top => (pt.0.clamp(cand.mx, cand.mx + cand.mw - 1), cand.my - 1),
+        Edge::Bottom => (
+            pt.0.clamp(cand.mx, cand.mx + cand.mw - 1),
+            cand.my + cand.mh,
+        ),
     };
-    if !MonitorFromPoint(neighbor, MONITOR_DEFAULTTONULL).is_invalid() {
+    if is_neighbor_occupied(neighbor) {
         EDGE_DWELL_START.store(0, Ordering::Relaxed);
         EDGE_DWELL_SEAM_IDX.store(-1, Ordering::Relaxed);
-        return None;
+        return false;
     }
 
     let seam_idx = cand.seam_info.as_ref().map(|(i, _, _)| *i).unwrap_or(-1);
@@ -1194,10 +1223,10 @@ unsafe fn handle_mouse_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> O
             cand.relative_y,
             cand.seam_info.map(|(_, t, a)| (t, a)),
         );
-        return Some(LRESULT(1));
+        return true;
     }
 
-    None
+    false
 }
 
 fn check_dwell_resistance(resistance_ms: u64) -> bool {
@@ -1217,9 +1246,9 @@ fn check_dwell_resistance(resistance_ms: u64) -> bool {
     }
 }
 
-/// Callback-safe leap transition: updates atomics and posts `WM_KVM_ENGAGE` to
-/// the hook thread so Win32 cursor/SendInput work runs outside hook callbacks.
-#[cfg(windows)]
+/// Callback-safe leap transition: updates atomics and wakes the platform hook
+/// thread so cursor/injection work runs outside hook callbacks.
+#[cfg(any(windows, target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 fn request_engage_leap(
     mx: i32,
@@ -1273,7 +1302,10 @@ fn request_engage_leap(
         });
     }
 
+    #[cfg(windows)]
     post_hook_thread_message(WM_KVM_ENGAGE);
+    #[cfg(target_os = "macos")]
+    macos_tap::signal_engage();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1916,31 +1948,55 @@ unsafe fn perform_engage_leap() -> bool {
         }
     }
 
-    let (tracker_before, released, send_input_us) =
-        if let Ok(mut tracker) = controller_tracker().try_lock() {
-            let before = if log_enabled {
-                KeySnapshot::from_slice(tracker.held_keys())
-            } else {
-                KeySnapshot::lock_failed()
-            };
-            let keys = tracker.release_keys();
-            let rel_snap = if log_enabled {
-                KeySnapshot::from_slice(&keys)
-            } else {
-                KeySnapshot::lock_failed()
-            };
-            let t0 = log_enabled.then(std::time::Instant::now);
-            for k in &keys {
-                let _ = super::injector::inject_key(k.key_code, k.scan_code, false, k.extended);
-            }
-            let elapsed_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
-            (before, rel_snap, elapsed_us)
-        } else {
-            (KeySnapshot::lock_failed(), KeySnapshot::lock_failed(), 0)
-        };
+    let (tracker_before, released, send_input_us) = release_controller_held_keys(log_enabled);
 
     record_hook_tick();
 
+    finalize_engage_leap(
+        relative_y,
+        fg_hwnd,
+        log_enabled,
+        tracker_before,
+        released,
+        send_input_us,
+    );
+    true
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn release_controller_held_keys(log_enabled: bool) -> (KeySnapshot, KeySnapshot, u64) {
+    if let Ok(mut tracker) = controller_tracker().try_lock() {
+        let before = if log_enabled {
+            KeySnapshot::from_slice(tracker.held_keys())
+        } else {
+            KeySnapshot::lock_failed()
+        };
+        let keys = tracker.release_keys();
+        let rel_snap = if log_enabled {
+            KeySnapshot::from_slice(&keys)
+        } else {
+            KeySnapshot::lock_failed()
+        };
+        let t0 = log_enabled.then(std::time::Instant::now);
+        for k in &keys {
+            let _ = super::injector::inject_key(k.key_code, k.scan_code, false, k.extended);
+        }
+        let elapsed_us = t0.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+        (before, rel_snap, elapsed_us)
+    } else {
+        (KeySnapshot::lock_failed(), KeySnapshot::lock_failed(), 0)
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn finalize_engage_leap(
+    relative_y: f32,
+    fg_hwnd: isize,
+    log_enabled: bool,
+    tracker_before: KeySnapshot,
+    released: KeySnapshot,
+    send_input_us: u64,
+) {
     if log_enabled {
         debug_log::record_event(DebugEvent::EngagePerform {
             ts_us: debug_log::now_us(),
@@ -1993,7 +2049,6 @@ unsafe fn perform_engage_leap() -> bool {
         debug_log::note(|| format!("DRAG_LEAP_DISPATCH_CB button={btn} dispatched={dispatched}"));
     }
     // --- end SPEC-25a ---
-    true
 }
 
 #[cfg(windows)]
@@ -2196,6 +2251,1127 @@ unsafe fn handle_keyboard_event(n_code: i32, w_param: WPARAM, l_param: LPARAM) -
     }
 
     None
+}
+
+#[cfg(any(target_os = "macos", test))]
+mod macos_logic {
+    use super::super::input_logic::monitor_at_point;
+    use super::super::monitors::MonitorDisplay;
+
+    pub const KCG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+    pub const KCG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+    pub const KCG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+    pub const KCG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
+    pub const KCG_EVENT_MOUSE_MOVED: u32 = 5;
+    pub const KCG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
+    pub const KCG_EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
+    pub const KCG_EVENT_KEY_DOWN: u32 = 10;
+    pub const KCG_EVENT_KEY_UP: u32 = 11;
+    pub const KCG_EVENT_FLAGS_CHANGED: u32 = 12;
+    pub const KCG_EVENT_SCROLL_WHEEL: u32 = 22;
+    pub const KCG_EVENT_OTHER_MOUSE_DOWN: u32 = 25;
+    pub const KCG_EVENT_OTHER_MOUSE_UP: u32 = 26;
+    pub const KCG_EVENT_OTHER_MOUSE_DRAGGED: u32 = 27;
+    pub const KCG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
+    pub const KCG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
+
+    pub const KCG_FLAG_ALPHA_SHIFT: u64 = 0x0001_0000;
+    pub const KCG_FLAG_SHIFT: u64 = 0x0002_0000;
+    pub const KCG_FLAG_CONTROL: u64 = 0x0004_0000;
+    pub const KCG_FLAG_OPTION: u64 = 0x0008_0000;
+    pub const KCG_FLAG_COMMAND: u64 = 0x0010_0000;
+
+    pub const KCG_FLAG_DEV_LCTRL: u64 = 0x0000_0001;
+    pub const KCG_FLAG_DEV_LSHIFT: u64 = 0x0000_0002;
+    pub const KCG_FLAG_DEV_RSHIFT: u64 = 0x0000_0004;
+    pub const KCG_FLAG_DEV_LCMD: u64 = 0x0000_0008;
+    pub const KCG_FLAG_DEV_RCMD: u64 = 0x0000_0010;
+    pub const KCG_FLAG_DEV_LOPT: u64 = 0x0000_0020;
+    pub const KCG_FLAG_DEV_ROPT: u64 = 0x0000_0040;
+    pub const KCG_FLAG_DEV_RCTRL: u64 = 0x0000_2000;
+
+    /// Maps macOS `CGKeyCode` (`kVK_*`) to `(vk_code, ps2_set1_scan_code, extended)`, symmetric
+    /// with `SPEC-28` (`Command -> Win`, `Option -> Alt`, `Control -> Ctrl`).
+    pub fn macos_cg_keycode_to_win_key(cg_keycode: u16) -> Option<(u16, u16, bool)> {
+        match cg_keycode {
+            // Letters (kVK_ANSI_A .. kVK_ANSI_Z)
+            0x00 => Some((0x41, 0x1E, false)), // A
+            0x0B => Some((0x42, 0x30, false)), // B
+            0x08 => Some((0x43, 0x2E, false)), // C
+            0x02 => Some((0x44, 0x20, false)), // D
+            0x0E => Some((0x45, 0x12, false)), // E
+            0x03 => Some((0x46, 0x21, false)), // F
+            0x05 => Some((0x47, 0x22, false)), // G
+            0x04 => Some((0x48, 0x23, false)), // H
+            0x22 => Some((0x49, 0x17, false)), // I
+            0x26 => Some((0x4A, 0x24, false)), // J
+            0x28 => Some((0x4B, 0x25, false)), // K
+            0x25 => Some((0x4C, 0x26, false)), // L
+            0x2E => Some((0x4D, 0x32, false)), // M
+            0x2D => Some((0x4E, 0x31, false)), // N
+            0x1F => Some((0x4F, 0x18, false)), // O
+            0x23 => Some((0x50, 0x19, false)), // P
+            0x0C => Some((0x51, 0x10, false)), // Q
+            0x0F => Some((0x52, 0x13, false)), // R
+            0x01 => Some((0x53, 0x1F, false)), // S
+            0x11 => Some((0x54, 0x14, false)), // T
+            0x20 => Some((0x55, 0x16, false)), // U
+            0x09 => Some((0x56, 0x2F, false)), // V
+            0x0D => Some((0x57, 0x11, false)), // W
+            0x07 => Some((0x58, 0x2D, false)), // X
+            0x10 => Some((0x59, 0x15, false)), // Y
+            0x06 => Some((0x5A, 0x2C, false)), // Z
+
+            // Digits
+            0x1D => Some((0x30, 0x0B, false)), // 0
+            0x12 => Some((0x31, 0x02, false)), // 1
+            0x13 => Some((0x32, 0x03, false)), // 2
+            0x14 => Some((0x33, 0x04, false)), // 3
+            0x15 => Some((0x34, 0x05, false)), // 4
+            0x17 => Some((0x35, 0x06, false)), // 5
+            0x16 => Some((0x36, 0x07, false)), // 6
+            0x1A => Some((0x37, 0x08, false)), // 7
+            0x1C => Some((0x38, 0x09, false)), // 8
+            0x19 => Some((0x39, 0x0A, false)), // 9
+
+            // Editing, whitespace, navigation
+            0x33 => Some((0x08, 0x0E, false)), // kVK_Delete -> VK_BACK
+            0x30 => Some((0x09, 0x0F, false)), // kVK_Tab -> VK_TAB
+            0x24 => Some((0x0D, 0x1C, false)), // kVK_Return -> VK_RETURN
+            0x4C => Some((0x0D, 0x1C, true)),  // kVK_ANSI_KeypadEnter -> VK_RETURN extended
+            0x35 => Some((0x1B, 0x01, false)), // kVK_Escape -> VK_ESCAPE
+            0x31 => Some((0x20, 0x39, false)), // kVK_Space -> VK_SPACE
+            0x74 => Some((0x21, 0x49, true)),  // kVK_PageUp -> VK_PRIOR
+            0x79 => Some((0x22, 0x51, true)),  // kVK_PageDown -> VK_NEXT
+            0x77 => Some((0x23, 0x4F, true)),  // kVK_End -> VK_END
+            0x73 => Some((0x24, 0x47, true)),  // kVK_Home -> VK_HOME
+            0x7B => Some((0x25, 0x4B, true)),  // kVK_LeftArrow -> VK_LEFT
+            0x7E => Some((0x26, 0x48, true)),  // kVK_UpArrow -> VK_UP
+            0x7C => Some((0x27, 0x4D, true)),  // kVK_RightArrow -> VK_RIGHT
+            0x7D => Some((0x28, 0x50, true)),  // kVK_DownArrow -> VK_DOWN
+            0x72 => Some((0x2D, 0x52, true)),  // kVK_Help -> VK_INSERT
+            0x75 => Some((0x2E, 0x53, true)),  // kVK_ForwardDelete -> VK_DELETE
+            0x6E => Some((0x5D, 0x5D, true)),  // kVK_ContextualMenu -> VK_APPS
+
+            // Modifiers (1:1 Command->Win, Option->Alt, Control->Ctrl)
+            0x38 => Some((0xA0, 0x2A, false)), // kVK_Shift -> VK_LSHIFT
+            0x3C => Some((0xA1, 0x36, false)), // kVK_RightShift -> VK_RSHIFT
+            0x3B => Some((0xA2, 0x1D, false)), // kVK_Control -> VK_LCONTROL
+            0x3E => Some((0xA3, 0x1D, true)),  // kVK_RightControl -> VK_RCONTROL
+            0x3A => Some((0xA4, 0x38, false)), // kVK_Option -> VK_LMENU
+            0x3D => Some((0xA5, 0x38, true)),  // kVK_RightOption -> VK_RMENU
+            0x37 => Some((0x5B, 0x5B, true)),  // kVK_Command -> VK_LWIN
+            0x36 => Some((0x5C, 0x5C, true)),  // kVK_RightCommand -> VK_RWIN
+            0x39 => Some((0x14, 0x3A, false)), // kVK_CapsLock -> VK_CAPITAL
+
+            // Function keys F1..F12 (Set 1 scancodes), F13..F20 (VK only so SendInput uses wVk)
+            0x7A => Some((0x70, 0x3B, false)), // F1
+            0x78 => Some((0x71, 0x3C, false)), // F2
+            0x63 => Some((0x72, 0x3D, false)), // F3
+            0x76 => Some((0x73, 0x3E, false)), // F4
+            0x60 => Some((0x74, 0x3F, false)), // F5
+            0x61 => Some((0x75, 0x40, false)), // F6
+            0x62 => Some((0x76, 0x41, false)), // F7
+            0x64 => Some((0x77, 0x42, false)), // F8
+            0x65 => Some((0x78, 0x43, false)), // F9
+            0x6D => Some((0x79, 0x44, false)), // F10
+            0x67 => Some((0x7A, 0x57, false)), // F11
+            0x6F => Some((0x7B, 0x58, false)), // F12
+            0x69 => Some((0x7C, 0x00, false)), // F13
+            0x6B => Some((0x7D, 0x00, false)), // F14
+            0x71 => Some((0x7E, 0x00, false)), // F15
+            0x6A => Some((0x7F, 0x00, false)), // F16
+            0x40 => Some((0x80, 0x00, false)), // F17
+            0x4F => Some((0x81, 0x00, false)), // F18
+            0x50 => Some((0x82, 0x00, false)), // F19
+            0x5A => Some((0x83, 0x00, false)), // F20
+
+            // Numpad
+            0x52 => Some((0x60, 0x52, false)), // VK_NUMPAD0
+            0x53 => Some((0x61, 0x4F, false)), // VK_NUMPAD1
+            0x54 => Some((0x62, 0x50, false)), // VK_NUMPAD2
+            0x55 => Some((0x63, 0x51, false)), // VK_NUMPAD3
+            0x56 => Some((0x64, 0x4B, false)), // VK_NUMPAD4
+            0x57 => Some((0x65, 0x4C, false)), // VK_NUMPAD5
+            0x58 => Some((0x66, 0x4D, false)), // VK_NUMPAD6
+            0x59 => Some((0x67, 0x47, false)), // VK_NUMPAD7
+            0x5B => Some((0x68, 0x48, false)), // VK_NUMPAD8
+            0x5C => Some((0x69, 0x49, false)), // VK_NUMPAD9
+            0x43 => Some((0x6A, 0x37, false)), // VK_MULTIPLY
+            0x45 => Some((0x6B, 0x4E, false)), // VK_ADD
+            0x4E => Some((0x6D, 0x4A, false)), // VK_SUBTRACT
+            0x41 => Some((0x6E, 0x53, false)), // VK_DECIMAL
+            0x4B => Some((0x6F, 0x35, true)),  // VK_DIVIDE
+            0x47 => Some((0x90, 0x45, true)),  // kVK_ANSI_KeypadClear -> VK_NUMLOCK
+            0x51 => Some((0xBB, 0x0D, false)), // kVK_ANSI_KeypadEquals -> VK_OEM_PLUS
+
+            // ANSI / ISO OEM punctuation
+            0x29 => Some((0xBA, 0x27, false)), // ;:
+            0x18 => Some((0xBB, 0x0D, false)), // =+
+            0x2B => Some((0xBC, 0x33, false)), // ,<
+            0x1B => Some((0xBD, 0x0C, false)), // -_
+            0x2F => Some((0xBE, 0x34, false)), // .>
+            0x2C => Some((0xBF, 0x35, false)), // /?
+            0x32 => Some((0xC0, 0x29, false)), // `~
+            0x21 => Some((0xDB, 0x1A, false)), // [{
+            0x2A => Some((0xDC, 0x2B, false)), // \|
+            0x1E => Some((0xDD, 0x1B, false)), // ]}
+            0x27 => Some((0xDE, 0x28, false)), // '"
+            0x0A => Some((0xE2, 0x56, false)), // kVK_ISO_Section -> VK_OEM_102
+            _ => None,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ModifierAction {
+        None,
+        Key {
+            vk: u16,
+            scan: u16,
+            is_down: bool,
+            extended: bool,
+        },
+        TogglePulse {
+            vk: u16,
+            scan: u16,
+        },
+    }
+
+    #[derive(Debug, Default)]
+    pub struct MacTapModifierTracker {
+        lshift: bool,
+        rshift: bool,
+        lctrl: bool,
+        rctrl: bool,
+        lopt: bool,
+        ropt: bool,
+        lcmd: bool,
+        rcmd: bool,
+        caps_lock: bool,
+    }
+
+    impl MacTapModifierTracker {
+        pub fn clear(&mut self) {
+            *self = Self::default();
+        }
+
+        pub fn ctrl_and_option_down(&self) -> bool {
+            (self.lctrl || self.rctrl) && (self.lopt || self.ropt)
+        }
+
+        pub fn on_flags_changed(&mut self, cg_keycode: u16, raw_flags: u64) -> ModifierAction {
+            if cg_keycode == 0x39 {
+                let alpha = (raw_flags & KCG_FLAG_ALPHA_SHIFT) != 0;
+                if alpha != self.caps_lock {
+                    self.caps_lock = alpha;
+                    return ModifierAction::TogglePulse {
+                        vk: 0x14,
+                        scan: 0x3A,
+                    };
+                }
+                return ModifierAction::None;
+            }
+
+            let Some((vk, scan, extended)) = macos_cg_keycode_to_win_key(cg_keycode) else {
+                return ModifierAction::None;
+            };
+
+            let (dev_pair, dev_bit, generic_bit, slot) = match cg_keycode {
+                0x38 => (
+                    KCG_FLAG_DEV_LSHIFT | KCG_FLAG_DEV_RSHIFT,
+                    KCG_FLAG_DEV_LSHIFT,
+                    KCG_FLAG_SHIFT,
+                    &mut self.lshift,
+                ),
+                0x3C => (
+                    KCG_FLAG_DEV_LSHIFT | KCG_FLAG_DEV_RSHIFT,
+                    KCG_FLAG_DEV_RSHIFT,
+                    KCG_FLAG_SHIFT,
+                    &mut self.rshift,
+                ),
+                0x3B => (
+                    KCG_FLAG_DEV_LCTRL | KCG_FLAG_DEV_RCTRL,
+                    KCG_FLAG_DEV_LCTRL,
+                    KCG_FLAG_CONTROL,
+                    &mut self.lctrl,
+                ),
+                0x3E => (
+                    KCG_FLAG_DEV_LCTRL | KCG_FLAG_DEV_RCTRL,
+                    KCG_FLAG_DEV_RCTRL,
+                    KCG_FLAG_CONTROL,
+                    &mut self.rctrl,
+                ),
+                0x3A => (
+                    KCG_FLAG_DEV_LOPT | KCG_FLAG_DEV_ROPT,
+                    KCG_FLAG_DEV_LOPT,
+                    KCG_FLAG_OPTION,
+                    &mut self.lopt,
+                ),
+                0x3D => (
+                    KCG_FLAG_DEV_LOPT | KCG_FLAG_DEV_ROPT,
+                    KCG_FLAG_DEV_ROPT,
+                    KCG_FLAG_OPTION,
+                    &mut self.ropt,
+                ),
+                0x37 => (
+                    KCG_FLAG_DEV_LCMD | KCG_FLAG_DEV_RCMD,
+                    KCG_FLAG_DEV_LCMD,
+                    KCG_FLAG_COMMAND,
+                    &mut self.lcmd,
+                ),
+                0x36 => (
+                    KCG_FLAG_DEV_LCMD | KCG_FLAG_DEV_RCMD,
+                    KCG_FLAG_DEV_RCMD,
+                    KCG_FLAG_COMMAND,
+                    &mut self.rcmd,
+                ),
+                _ => return ModifierAction::None,
+            };
+
+            let is_down = if (raw_flags & dev_pair) != 0 {
+                (raw_flags & dev_bit) != 0
+            } else {
+                (raw_flags & generic_bit) != 0
+            };
+
+            if is_down == *slot {
+                return ModifierAction::None;
+            }
+            *slot = is_down;
+            ModifierAction::Key {
+                vk,
+                scan,
+                is_down,
+                extended,
+            }
+        }
+    }
+
+    pub fn is_emergency_release_combo(vk_code: u16, ctrl_down: bool, opt_down: bool) -> bool {
+        vk_code == 0x91 || vk_code == 0x13 || (vk_code == 0x1B && ctrl_down && opt_down)
+    }
+
+    #[derive(Debug, Default)]
+    pub struct MacTapDeltaTracker {
+        center: (f64, f64),
+        leap_edge_pt: (f64, f64),
+        last_anchor: (f64, f64),
+        settling: bool,
+        acc_x: f64,
+        acc_y: f64,
+    }
+
+    impl MacTapDeltaTracker {
+        pub fn engage(&mut self, center: (f64, f64), leap_edge_pt: (f64, f64)) {
+            self.center = center;
+            self.leap_edge_pt = leap_edge_pt;
+            self.last_anchor = center;
+            self.settling = true;
+            self.acc_x = 0.0;
+            self.acc_y = 0.0;
+        }
+
+        pub fn reset(&mut self) {
+            self.settling = false;
+            self.acc_x = 0.0;
+            self.acc_y = 0.0;
+        }
+
+        pub fn on_moved(
+            &mut self,
+            pt: (f64, f64),
+            elapsed_since_engage_ms: u64,
+        ) -> Option<(i32, i32, bool)> {
+            if self.settling {
+                let d_edge =
+                    (pt.0 - self.leap_edge_pt.0).powi(2) + (pt.1 - self.leap_edge_pt.1).powi(2);
+                let d_center = (pt.0 - self.center.0).powi(2) + (pt.1 - self.center.1).powi(2);
+                if elapsed_since_engage_ms <= 25 && d_edge < d_center && d_center > 16.0 {
+                    return None;
+                }
+                self.settling = false;
+                self.last_anchor = self.center;
+            }
+
+            let raw_dx = pt.0 - self.last_anchor.0;
+            let raw_dy = pt.1 - self.last_anchor.1;
+            self.acc_x += raw_dx;
+            self.acc_y += raw_dy;
+
+            let dx = self.acc_x.trunc() as i32;
+            let dy = self.acc_y.trunc() as i32;
+            self.acc_x -= dx as f64;
+            self.acc_y -= dy as f64;
+
+            let should_warp = dx != 0
+                || dy != 0
+                || (pt.0 - self.center.0).abs() >= 1.0
+                || (pt.1 - self.center.1).abs() >= 1.0;
+            self.last_anchor = if should_warp { self.center } else { pt };
+            Some((dx, dy, should_warp))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct MacTapScrollAccumulator {
+        _reserved: (),
+    }
+
+    impl MacTapScrollAccumulator {
+        pub fn push(
+            &mut self,
+            is_continuous: bool,
+            point_delta_axis1: i64,
+            discrete_delta_axis1: i64,
+        ) -> i32 {
+            if is_continuous {
+                let clamped = point_delta_axis1.clamp(-10_000, 10_000) as i32;
+                clamped.saturating_mul(3)
+            } else {
+                let clamped = discrete_delta_axis1.clamp(-127, 127) as i32;
+                clamped.saturating_mul(120)
+            }
+        }
+    }
+
+    pub fn cg_button_to_kvm(event_type: u32, button_number: i64) -> Option<(u8, bool)> {
+        match event_type {
+            KCG_EVENT_LEFT_MOUSE_DOWN => Some((1, true)),
+            KCG_EVENT_LEFT_MOUSE_UP => Some((1, false)),
+            KCG_EVENT_RIGHT_MOUSE_DOWN => Some((2, true)),
+            KCG_EVENT_RIGHT_MOUSE_UP => Some((2, false)),
+            KCG_EVENT_OTHER_MOUSE_DOWN if button_number == 2 => Some((3, true)),
+            KCG_EVENT_OTHER_MOUSE_UP if button_number == 2 => Some((3, false)),
+            _ => None,
+        }
+    }
+
+    pub fn is_point_on_local_display(pt: (i32, i32), monitors: &[MonitorDisplay]) -> bool {
+        monitor_at_point(monitors, pt.0, pt.1).is_some()
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_tap {
+    use super::super::debug_log::{self, DebugEvent, KeyDecision};
+    use super::super::injector::{
+        check_accessibility_permission, check_input_monitoring_permission,
+        is_self_injected_cg_user_data,
+    };
+    use super::super::protocol::KvmPacket;
+    use super::macos_logic::{
+        cg_button_to_kvm, is_emergency_release_combo, is_point_on_local_display,
+        macos_cg_keycode_to_win_key, MacTapDeltaTracker, MacTapModifierTracker,
+        MacTapScrollAccumulator, ModifierAction, KCG_EVENT_FLAGS_CHANGED, KCG_EVENT_KEY_DOWN,
+        KCG_EVENT_KEY_UP, KCG_EVENT_LEFT_MOUSE_DOWN, KCG_EVENT_LEFT_MOUSE_DRAGGED,
+        KCG_EVENT_LEFT_MOUSE_UP, KCG_EVENT_MOUSE_MOVED, KCG_EVENT_OTHER_MOUSE_DOWN,
+        KCG_EVENT_OTHER_MOUSE_DRAGGED, KCG_EVENT_OTHER_MOUSE_UP, KCG_EVENT_RIGHT_MOUSE_DOWN,
+        KCG_EVENT_RIGHT_MOUSE_DRAGGED, KCG_EVENT_RIGHT_MOUSE_UP, KCG_EVENT_SCROLL_WHEEL,
+        KCG_EVENT_TAP_DISABLED_BY_TIMEOUT, KCG_EVENT_TAP_DISABLED_BY_USER_INPUT, KCG_FLAG_CONTROL,
+        KCG_FLAG_OPTION,
+    };
+    use super::{
+        controller_tracker, disarm_trapped_in_callback, finalize_engage_leap, local_monitors,
+        mouse_delta_sender, release_controller_held_keys, should_perform_engage,
+        try_evaluate_edge_leap, try_send_packet, CLAMP_CENTER_X, CLAMP_CENTER_Y, CURSOR_CENTERED,
+        EDGE_DWELL_SEAM_IDX, EDGE_DWELL_START, ENGAGE_PENDING, HAS_ACTIVE_LINK, HOOK_ACTIVE,
+        IS_TRAPPED, KEY_ALT_DOWN, KEY_CTRL_DOWN, MOUSE_BUTTONS_DOWN, PENDING_ENGAGE_REL_Y,
+    };
+    use std::ffi::c_void;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::time::Instant;
+
+    type CFTypeRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFRunLoopRef = *mut c_void;
+    type CFRunLoopSourceRef = *mut c_void;
+    type CFRunLoopMode = *const c_void;
+    type CFMachPortRef = *mut c_void;
+    type CGEventTapProxy = *mut c_void;
+    type CGEventRef = *mut c_void;
+
+    const K_CG_SESSION_EVENT_TAP: u32 = 1;
+    const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+    const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
+    const K_CG_MOUSE_EVENT_BUTTON_NUMBER: u32 = 3;
+    const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
+    const K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS1: u32 = 11;
+    const K_CG_EVENT_SOURCE_USER_DATA: u32 = 42;
+    const K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS: u32 = 88;
+    const K_CG_SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS1: u32 = 96;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[repr(C)]
+    struct CFRunLoopSourceContext {
+        version: isize,
+        info: *mut c_void,
+        retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+        release: Option<extern "C" fn(*const c_void)>,
+        copy_description: Option<extern "C" fn(*const c_void) -> *const c_void>,
+        equal: Option<extern "C" fn(*const c_void, *const c_void) -> u8>,
+        hash: Option<extern "C" fn(*const c_void) -> usize>,
+        schedule: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFRunLoopMode)>,
+        cancel: Option<extern "C" fn(*mut c_void, CFRunLoopRef, CFRunLoopMode)>,
+        perform: Option<extern "C" fn(*mut c_void)>,
+    }
+
+    type CGEventTapCallBack = unsafe extern "C" fn(
+        proxy: CGEventTapProxy,
+        event_type: u32,
+        event: CGEventRef,
+        user_info: *mut c_void,
+    ) -> CGEventRef;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopCommonModes: CFRunLoopMode;
+        fn CFRelease(cf: CFTypeRef);
+        fn CFMachPortInvalidate(port: CFMachPortRef);
+        fn CFMachPortCreateRunLoopSource(
+            allocator: CFAllocatorRef,
+            port: CFMachPortRef,
+            order: isize,
+        ) -> CFRunLoopSourceRef;
+        fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+        fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFRunLoopMode);
+        fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFRunLoopMode);
+        fn CFRunLoopRun();
+        fn CFRunLoopStop(rl: CFRunLoopRef);
+        fn CFRunLoopWakeUp(rl: CFRunLoopRef);
+        fn CFRunLoopSourceCreate(
+            allocator: CFAllocatorRef,
+            order: isize,
+            context: *mut CFRunLoopSourceContext,
+        ) -> CFRunLoopSourceRef;
+        fn CFRunLoopSourceSignal(source: CFRunLoopSourceRef);
+        fn CFRunLoopSourceInvalidate(source: CFRunLoopSourceRef);
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: u64,
+            callback: CGEventTapCallBack,
+            user_info: *mut c_void,
+        ) -> CFMachPortRef;
+        fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+        fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+        fn CGEventGetFlags(event: CGEventRef) -> u64;
+        fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayHideCursor(display: u32) -> i32;
+        fn CGDisplayShowCursor(display: u32) -> i32;
+        fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+    }
+
+    struct TapHandle {
+        run_loop: usize,
+        tap_port: usize,
+        engage_src: usize,
+        restore_src: usize,
+    }
+
+    static TAP_HANDLE: Mutex<Option<TapHandle>> = Mutex::new(None);
+    static MACOS_CURSOR_HIDDEN: AtomicBool = AtomicBool::new(false);
+    static PENDING_RETURN_WARP: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    static LEAP_EDGE_X_BITS: AtomicU64 = AtomicU64::new(0);
+    static LEAP_EDGE_Y_BITS: AtomicU64 = AtomicU64::new(0);
+    static ENGAGE_TIMESTAMP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    static DELTA_TRACKER: OnceLock<Mutex<MacTapDeltaTracker>> = OnceLock::new();
+    static MOD_TRACKER: OnceLock<Mutex<MacTapModifierTracker>> = OnceLock::new();
+    static SCROLL_ACC: OnceLock<Mutex<MacTapScrollAccumulator>> = OnceLock::new();
+
+    fn engage_timestamp() -> &'static Mutex<Option<Instant>> {
+        ENGAGE_TIMESTAMP.get_or_init(|| Mutex::new(None))
+    }
+
+    fn delta_tracker() -> &'static Mutex<MacTapDeltaTracker> {
+        DELTA_TRACKER.get_or_init(|| Mutex::new(MacTapDeltaTracker::default()))
+    }
+
+    fn mod_tracker() -> &'static Mutex<MacTapModifierTracker> {
+        MOD_TRACKER.get_or_init(|| Mutex::new(MacTapModifierTracker::default()))
+    }
+
+    fn scroll_acc() -> &'static Mutex<MacTapScrollAccumulator> {
+        SCROLL_ACC.get_or_init(|| Mutex::new(MacTapScrollAccumulator::default()))
+    }
+
+    fn source_context(perform: extern "C" fn(*mut c_void)) -> CFRunLoopSourceContext {
+        CFRunLoopSourceContext {
+            version: 0,
+            info: ptr::null_mut(),
+            retain: None,
+            release: None,
+            copy_description: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: Some(perform),
+        }
+    }
+
+    pub fn restore_cursor_direct() {
+        if MACOS_CURSOR_HIDDEN.swap(false, Ordering::AcqRel) {
+            unsafe {
+                let _ = CGDisplayShowCursor(CGMainDisplayID());
+            }
+        }
+        if let Ok(mut dt) = delta_tracker().try_lock() {
+            dt.reset();
+        }
+    }
+
+    extern "C" fn perform_engage_source(_info: *mut c_void) {
+        if !should_perform_engage(
+            HOOK_ACTIVE.load(Ordering::Relaxed),
+            IS_TRAPPED.load(Ordering::Acquire),
+            ENGAGE_PENDING.swap(false, Ordering::AcqRel),
+        ) {
+            return;
+        }
+        let log_enabled = debug_log::is_enabled();
+        let center_x = CLAMP_CENTER_X.load(Ordering::Relaxed);
+        let center_y = CLAMP_CENTER_Y.load(Ordering::Relaxed);
+        let leap_x = f64::from_bits(LEAP_EDGE_X_BITS.load(Ordering::Acquire));
+        let leap_y = f64::from_bits(LEAP_EDGE_Y_BITS.load(Ordering::Acquire));
+
+        if let Ok(mut dt) = delta_tracker().lock() {
+            dt.engage((center_x as f64, center_y as f64), (leap_x, leap_y));
+        }
+        if let Ok(mut ts) = engage_timestamp().lock() {
+            *ts = Some(Instant::now());
+        }
+        unsafe {
+            if !MACOS_CURSOR_HIDDEN.swap(true, Ordering::AcqRel) {
+                let _ = CGDisplayHideCursor(CGMainDisplayID());
+            }
+            let _ = CGWarpMouseCursorPosition(CGPoint {
+                x: center_x as f64,
+                y: center_y as f64,
+            });
+        }
+        CURSOR_CENTERED.store(true, Ordering::Release);
+
+        let (tracker_before, released, send_input_us) = release_controller_held_keys(log_enabled);
+        if let Ok(mut mt) = mod_tracker().lock() {
+            mt.clear();
+        }
+        let relative_y = f32::from_bits(PENDING_ENGAGE_REL_Y.load(Ordering::Relaxed));
+        finalize_engage_leap(
+            relative_y,
+            0,
+            log_enabled,
+            tracker_before,
+            released,
+            send_input_us,
+        );
+    }
+
+    extern "C" fn perform_restore_source(_info: *mut c_void) {
+        restore_cursor_direct();
+        let warp = PENDING_RETURN_WARP.lock().ok().and_then(|mut g| g.take());
+        if let Some((rx, ry)) = warp {
+            unsafe {
+                let _ = CGWarpMouseCursorPosition(CGPoint {
+                    x: rx as f64,
+                    y: ry as f64,
+                });
+            }
+        }
+    }
+
+    pub fn signal_engage() {
+        if let Ok(guard) = TAP_HANDLE.try_lock() {
+            if let Some(ref h) = *guard {
+                unsafe {
+                    CFRunLoopSourceSignal(h.engage_src as CFRunLoopSourceRef);
+                    CFRunLoopWakeUp(h.run_loop as CFRunLoopRef);
+                }
+            }
+        }
+    }
+
+    pub fn signal_restore() {
+        if let Ok(guard) = TAP_HANDLE.try_lock() {
+            if let Some(ref h) = *guard {
+                unsafe {
+                    CFRunLoopSourceSignal(h.restore_src as CFRunLoopSourceRef);
+                    CFRunLoopWakeUp(h.run_loop as CFRunLoopRef);
+                }
+            }
+        }
+    }
+
+    pub fn schedule_return_warp(rx: i32, ry: i32) {
+        if let Ok(mut g) = PENDING_RETURN_WARP.lock() {
+            *g = Some((rx, ry));
+        }
+        signal_restore();
+    }
+
+    unsafe extern "C" fn event_tap_callback(
+        _proxy: CGEventTapProxy,
+        event_type: u32,
+        event: CGEventRef,
+        _user_info: *mut c_void,
+    ) -> CGEventRef {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_tap_event(event_type, event)
+        }));
+        match outcome {
+            Ok(res) => res,
+            Err(_) => {
+                disarm_trapped_in_callback();
+                if let Ok(mut dt) = delta_tracker().try_lock() {
+                    dt.reset();
+                }
+                debug_log::record_event(DebugEvent::Release {
+                    ts_us: debug_log::now_us(),
+                    reason: "macos_tap_panic",
+                });
+                signal_restore();
+                event
+            }
+        }
+    }
+
+    unsafe fn handle_tap_event(event_type: u32, event: CGEventRef) -> CGEventRef {
+        if event_type == KCG_EVENT_TAP_DISABLED_BY_TIMEOUT
+            || event_type == KCG_EVENT_TAP_DISABLED_BY_USER_INPUT
+        {
+            if HOOK_ACTIVE.load(Ordering::Acquire) {
+                if let Ok(guard) = TAP_HANDLE.try_lock() {
+                    if let Some(ref h) = *guard {
+                        CGEventTapEnable(h.tap_port as CFMachPortRef, true);
+                    }
+                }
+            }
+            return event;
+        }
+
+        if event.is_null() || !HOOK_ACTIVE.load(Ordering::Relaxed) {
+            return event;
+        }
+
+        let user_data = CGEventGetIntegerValueField(event, K_CG_EVENT_SOURCE_USER_DATA);
+        if is_self_injected_cg_user_data(user_data) {
+            return event;
+        }
+
+        let button_number = CGEventGetIntegerValueField(event, K_CG_MOUSE_EVENT_BUTTON_NUMBER);
+        if let Some((btn, is_down)) = cg_button_to_kvm(event_type, button_number) {
+            let bit = 1u8 << (btn - 1);
+            if is_down {
+                MOUSE_BUTTONS_DOWN.fetch_or(bit, Ordering::Relaxed);
+            } else {
+                MOUSE_BUTTONS_DOWN.fetch_and(!bit, Ordering::Relaxed);
+            }
+        }
+
+        let trapped = IS_TRAPPED.load(Ordering::Acquire);
+
+        if event_type == KCG_EVENT_FLAGS_CHANGED {
+            let cg_code = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
+            let raw_flags = CGEventGetFlags(event);
+            KEY_CTRL_DOWN.store((raw_flags & KCG_FLAG_CONTROL) != 0, Ordering::Relaxed);
+            KEY_ALT_DOWN.store((raw_flags & KCG_FLAG_OPTION) != 0, Ordering::Relaxed);
+
+            let action = mod_tracker()
+                .try_lock()
+                .map(|mut m| m.on_flags_changed(cg_code, raw_flags))
+                .unwrap_or(ModifierAction::None);
+
+            if trapped {
+                match action {
+                    ModifierAction::Key {
+                        vk,
+                        scan,
+                        is_down,
+                        extended,
+                    } => {
+                        try_send_packet(KvmPacket::KeyEvent {
+                            key_code: vk,
+                            scan_code: scan,
+                            is_down,
+                            extended,
+                        });
+                    }
+                    ModifierAction::TogglePulse { vk, scan } => {
+                        try_send_packet(KvmPacket::KeyEvent {
+                            key_code: vk,
+                            scan_code: scan,
+                            is_down: true,
+                            extended: false,
+                        });
+                        try_send_packet(KvmPacket::KeyEvent {
+                            key_code: vk,
+                            scan_code: scan,
+                            is_down: false,
+                            extended: false,
+                        });
+                    }
+                    ModifierAction::None => {}
+                }
+                return ptr::null_mut();
+            }
+
+            if let ModifierAction::Key {
+                vk,
+                scan,
+                is_down,
+                extended,
+            } = action
+            {
+                if let Ok(mut tracker) = controller_tracker().try_lock() {
+                    tracker.record_key(vk, scan, is_down, extended, false);
+                }
+            }
+            return event;
+        }
+
+        if event_type == KCG_EVENT_KEY_DOWN || event_type == KCG_EVENT_KEY_UP {
+            let is_down = event_type == KCG_EVENT_KEY_DOWN;
+            let cg_code = CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16;
+            let Some((vk_code, scan_code, extended)) = macos_cg_keycode_to_win_key(cg_code) else {
+                return if trapped { ptr::null_mut() } else { event };
+            };
+            let log_enabled = debug_log::is_enabled();
+            let ts_us = if log_enabled { debug_log::now_us() } else { 0 };
+
+            let ctrl_down = KEY_CTRL_DOWN.load(Ordering::Relaxed);
+            let opt_down = KEY_ALT_DOWN.load(Ordering::Relaxed);
+            if is_down && is_emergency_release_combo(vk_code, ctrl_down, opt_down) {
+                disarm_trapped_in_callback();
+                KEY_CTRL_DOWN.store(false, Ordering::Relaxed);
+                KEY_ALT_DOWN.store(false, Ordering::Relaxed);
+                if let Ok(mut mt) = mod_tracker().try_lock() {
+                    mt.clear();
+                }
+                if let Ok(mut dt) = delta_tracker().try_lock() {
+                    dt.reset();
+                }
+                if let Ok(mut tracker) = controller_tracker().try_lock() {
+                    let _ = tracker.release_all();
+                }
+                if log_enabled {
+                    debug_log::record_event(DebugEvent::Key {
+                        ts_us,
+                        vk: vk_code,
+                        scan_code,
+                        is_down,
+                        extended,
+                        injected: false,
+                        is_trapped: trapped,
+                        decision: KeyDecision::Block,
+                        hwnd: 0,
+                    });
+                    debug_log::record_event(DebugEvent::Release {
+                        ts_us,
+                        reason: "emergency_hotkey",
+                    });
+                }
+                signal_restore();
+                try_send_packet(KvmPacket::EmergencyRelease);
+                try_send_packet(KvmPacket::ReleaseAll);
+                return ptr::null_mut();
+            }
+
+            if trapped {
+                if log_enabled {
+                    debug_log::record_event(DebugEvent::Key {
+                        ts_us,
+                        vk: vk_code,
+                        scan_code,
+                        is_down,
+                        extended,
+                        injected: false,
+                        is_trapped: true,
+                        decision: KeyDecision::Forward,
+                        hwnd: 0,
+                    });
+                }
+                try_send_packet(KvmPacket::KeyEvent {
+                    key_code: vk_code,
+                    scan_code,
+                    is_down,
+                    extended,
+                });
+                return ptr::null_mut();
+            }
+
+            if log_enabled {
+                debug_log::record_event(DebugEvent::Key {
+                    ts_us,
+                    vk: vk_code,
+                    scan_code,
+                    is_down,
+                    extended,
+                    injected: false,
+                    is_trapped: false,
+                    decision: KeyDecision::Pass,
+                    hwnd: 0,
+                });
+            }
+            if let Ok(mut tracker) = controller_tracker().try_lock() {
+                tracker.record_key(vk_code, scan_code, is_down, extended, false);
+            }
+            return event;
+        }
+
+        if trapped {
+            match event_type {
+                KCG_EVENT_MOUSE_MOVED
+                | KCG_EVENT_LEFT_MOUSE_DRAGGED
+                | KCG_EVENT_RIGHT_MOUSE_DRAGGED
+                | KCG_EVENT_OTHER_MOUSE_DRAGGED => {
+                    if CURSOR_CENTERED.load(Ordering::Acquire) {
+                        let pt_f = CGEventGetLocation(event);
+                        let elapsed = engage_timestamp()
+                            .try_lock()
+                            .ok()
+                            .and_then(|g| g.map(|t| t.elapsed().as_millis() as u64))
+                            .unwrap_or(100);
+                        if let Ok(mut dt) = delta_tracker().try_lock() {
+                            if let Some((dx, dy, should_warp)) =
+                                dt.on_moved((pt_f.x, pt_f.y), elapsed)
+                            {
+                                if should_warp {
+                                    let _ = CGWarpMouseCursorPosition(CGPoint {
+                                        x: CLAMP_CENTER_X.load(Ordering::Relaxed) as f64,
+                                        y: CLAMP_CENTER_Y.load(Ordering::Relaxed) as f64,
+                                    });
+                                }
+                                if dx != 0 || dy != 0 {
+                                    if let Ok(guard) = mouse_delta_sender().try_lock() {
+                                        if let Some(ref tx) = *guard {
+                                            let _ = tx.try_send((dx, dy));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return ptr::null_mut();
+                }
+                KCG_EVENT_LEFT_MOUSE_DOWN
+                | KCG_EVENT_LEFT_MOUSE_UP
+                | KCG_EVENT_RIGHT_MOUSE_DOWN
+                | KCG_EVENT_RIGHT_MOUSE_UP
+                | KCG_EVENT_OTHER_MOUSE_DOWN
+                | KCG_EVENT_OTHER_MOUSE_UP => {
+                    if let Some((button, is_down)) = cg_button_to_kvm(event_type, button_number) {
+                        try_send_packet(KvmPacket::MouseButton { button, is_down });
+                    }
+                    return ptr::null_mut();
+                }
+                KCG_EVENT_SCROLL_WHEEL => {
+                    let is_continuous =
+                        CGEventGetIntegerValueField(event, K_CG_SCROLL_WHEEL_EVENT_IS_CONTINUOUS)
+                            != 0;
+                    let pt_delta = CGEventGetIntegerValueField(
+                        event,
+                        K_CG_SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS1,
+                    );
+                    let disc_delta =
+                        CGEventGetIntegerValueField(event, K_CG_SCROLL_WHEEL_EVENT_DELTA_AXIS1);
+                    let delta = scroll_acc()
+                        .try_lock()
+                        .map(|mut s| s.push(is_continuous, pt_delta, disc_delta))
+                        .unwrap_or(0);
+                    if delta != 0 {
+                        try_send_packet(KvmPacket::MouseWheel { delta });
+                    }
+                    return ptr::null_mut();
+                }
+                _ => return event,
+            }
+        }
+
+        if event_type != KCG_EVENT_MOUSE_MOVED || !HAS_ACTIVE_LINK.load(Ordering::Acquire) {
+            return event;
+        }
+
+        if MOUSE_BUTTONS_DOWN.load(Ordering::Relaxed) != 0 {
+            EDGE_DWELL_START.store(0, Ordering::Relaxed);
+            EDGE_DWELL_SEAM_IDX.store(-1, Ordering::Relaxed);
+            return event;
+        }
+
+        let pt_f = CGEventGetLocation(event);
+        LEAP_EDGE_X_BITS.store(pt_f.x.to_bits(), Ordering::Release);
+        LEAP_EDGE_Y_BITS.store(pt_f.y.to_bits(), Ordering::Release);
+        let pt_i = (pt_f.x.round() as i32, pt_f.y.round() as i32);
+        if try_evaluate_edge_leap(pt_i, |neighbor| {
+            local_monitors()
+                .try_lock()
+                .is_ok_and(|mons| is_point_on_local_display(neighbor, &mons))
+        }) {
+            return ptr::null_mut();
+        }
+
+        event
+    }
+
+    fn run_tap_loop(ready_tx: mpsc::SyncSender<bool>) {
+        let mask: u64 = (1u64 << KCG_EVENT_LEFT_MOUSE_DOWN)
+            | (1u64 << KCG_EVENT_LEFT_MOUSE_UP)
+            | (1u64 << KCG_EVENT_RIGHT_MOUSE_DOWN)
+            | (1u64 << KCG_EVENT_RIGHT_MOUSE_UP)
+            | (1u64 << KCG_EVENT_MOUSE_MOVED)
+            | (1u64 << KCG_EVENT_LEFT_MOUSE_DRAGGED)
+            | (1u64 << KCG_EVENT_RIGHT_MOUSE_DRAGGED)
+            | (1u64 << KCG_EVENT_KEY_DOWN)
+            | (1u64 << KCG_EVENT_KEY_UP)
+            | (1u64 << KCG_EVENT_FLAGS_CHANGED)
+            | (1u64 << KCG_EVENT_SCROLL_WHEEL)
+            | (1u64 << KCG_EVENT_OTHER_MOUSE_DOWN)
+            | (1u64 << KCG_EVENT_OTHER_MOUSE_UP)
+            | (1u64 << KCG_EVENT_OTHER_MOUSE_DRAGGED);
+
+        unsafe {
+            let tap = CGEventTapCreate(
+                K_CG_SESSION_EVENT_TAP,
+                K_CG_HEAD_INSERT_EVENT_TAP,
+                K_CG_EVENT_TAP_OPTION_DEFAULT,
+                mask,
+                event_tap_callback,
+                ptr::null_mut(),
+            );
+            if tap.is_null() {
+                let _ = ready_tx.send(false);
+                return;
+            }
+
+            let tap_src = CFMachPortCreateRunLoopSource(ptr::null(), tap, 0);
+            let mut engage_ctx = source_context(perform_engage_source);
+            let engage_src = CFRunLoopSourceCreate(ptr::null(), 0, &mut engage_ctx);
+            let mut restore_ctx = source_context(perform_restore_source);
+            let restore_src = CFRunLoopSourceCreate(ptr::null(), 0, &mut restore_ctx);
+            if tap_src.is_null() || engage_src.is_null() || restore_src.is_null() {
+                if !tap_src.is_null() {
+                    CFRelease(tap_src as CFTypeRef);
+                }
+                if !engage_src.is_null() {
+                    CFRunLoopSourceInvalidate(engage_src);
+                    CFRelease(engage_src as CFTypeRef);
+                }
+                if !restore_src.is_null() {
+                    CFRunLoopSourceInvalidate(restore_src);
+                    CFRelease(restore_src as CFTypeRef);
+                }
+                CFMachPortInvalidate(tap);
+                CFRelease(tap as CFTypeRef);
+                let _ = ready_tx.send(false);
+                return;
+            }
+
+            let rl = CFRunLoopGetCurrent();
+            CFRunLoopAddSource(rl, tap_src, kCFRunLoopCommonModes);
+            CFRunLoopAddSource(rl, engage_src, kCFRunLoopCommonModes);
+            CFRunLoopAddSource(rl, restore_src, kCFRunLoopCommonModes);
+            CGEventTapEnable(tap, true);
+
+            if let Ok(mut guard) = TAP_HANDLE.lock() {
+                *guard = Some(TapHandle {
+                    run_loop: rl as usize,
+                    tap_port: tap as usize,
+                    engage_src: engage_src as usize,
+                    restore_src: restore_src as usize,
+                });
+            }
+
+            KEY_CTRL_DOWN.store(false, Ordering::Relaxed);
+            KEY_ALT_DOWN.store(false, Ordering::Relaxed);
+            MOUSE_BUTTONS_DOWN.store(0, Ordering::Relaxed);
+            if let Ok(mut mt) = mod_tracker().lock() {
+                mt.clear();
+            }
+            if let Ok(mut dt) = delta_tracker().lock() {
+                dt.reset();
+            }
+            HOOK_ACTIVE.store(true, Ordering::SeqCst);
+            let _ = ready_tx.send(true);
+
+            CFRunLoopRun();
+
+            if let Ok(mut guard) = TAP_HANDLE.lock() {
+                if guard.as_ref().is_some_and(|h| h.run_loop == rl as usize) {
+                    *guard = None;
+                }
+            }
+
+            CGEventTapEnable(tap, false);
+            CFRunLoopRemoveSource(rl, tap_src, kCFRunLoopCommonModes);
+            CFRunLoopRemoveSource(rl, engage_src, kCFRunLoopCommonModes);
+            CFRunLoopRemoveSource(rl, restore_src, kCFRunLoopCommonModes);
+            CFRunLoopSourceInvalidate(engage_src);
+            CFRunLoopSourceInvalidate(restore_src);
+            CFMachPortInvalidate(tap);
+            CFRelease(tap_src as CFTypeRef);
+            CFRelease(engage_src as CFTypeRef);
+            CFRelease(restore_src as CFTypeRef);
+            CFRelease(tap as CFTypeRef);
+            restore_cursor_direct();
+        }
+    }
+
+    pub fn start() -> bool {
+        if HOOK_ACTIVE.load(Ordering::Acquire)
+            && TAP_HANDLE.lock().ok().is_some_and(|g| g.is_some())
+        {
+            return true;
+        }
+        let prompt = !cfg!(test);
+        if !check_accessibility_permission(prompt) {
+            HOOK_ACTIVE.store(false, Ordering::SeqCst);
+            HAS_ACTIVE_LINK.store(false, Ordering::Release);
+            return false;
+        }
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<bool>(1);
+        if std::thread::Builder::new()
+            .name("kvm-macos-event-tap".into())
+            .spawn(move || run_tap_loop(ready_tx))
+            .is_err()
+        {
+            HOOK_ACTIVE.store(false, Ordering::SeqCst);
+            HAS_ACTIVE_LINK.store(false, Ordering::Release);
+            return false;
+        }
+        let started = ready_rx.recv().unwrap_or(false);
+        if !started {
+            if prompt {
+                let _ = check_input_monitoring_permission(true);
+            }
+            HOOK_ACTIVE.store(false, Ordering::SeqCst);
+            HAS_ACTIVE_LINK.store(false, Ordering::Release);
+        }
+        started
+    }
+
+    pub fn stop() {
+        if let Ok(guard) = TAP_HANDLE.lock() {
+            if let Some(ref h) = *guard {
+                unsafe {
+                    CFRunLoopStop(h.run_loop as CFRunLoopRef);
+                    CFRunLoopWakeUp(h.run_loop as CFRunLoopRef);
+                }
+            }
+        }
+        restore_cursor_direct();
+    }
 }
 
 #[cfg(test)]
@@ -2480,7 +3656,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn start_hooks_on_non_windows_leaves_hooks_inactive() {
         let controller = HookController::new();
@@ -2491,6 +3667,217 @@ mod tests {
         assert!(!controller.is_active());
         assert_eq!(controller.active_link_edge(), None);
         controller.stop_hooks();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_restore_cursor_and_stop_without_active_tap_are_safe() {
+        let controller = HookController::new();
+        restore_cursor_visibility();
+        controller.stop_hooks();
+        assert!(!controller.is_active());
+        assert!(!controller.is_trapped());
+    }
+
+    #[test]
+    fn macos_reverse_keymap_round_trips_spec28_with_set1_scancodes() {
+        use macos_logic::macos_cg_keycode_to_win_key;
+
+        // Letters, digits, return vs keypad enter, backspace vs forward delete
+        assert_eq!(macos_cg_keycode_to_win_key(0x00), Some((0x41, 0x1E, false))); // A
+        assert_eq!(macos_cg_keycode_to_win_key(0x06), Some((0x5A, 0x2C, false))); // Z
+        assert_eq!(macos_cg_keycode_to_win_key(0x1D), Some((0x30, 0x0B, false))); // 0
+        assert_eq!(macos_cg_keycode_to_win_key(0x24), Some((0x0D, 0x1C, false))); // Return
+        assert_eq!(macos_cg_keycode_to_win_key(0x4C), Some((0x0D, 0x1C, true))); // KeypadEnter
+        assert_eq!(macos_cg_keycode_to_win_key(0x33), Some((0x08, 0x0E, false))); // Backspace
+        assert_eq!(macos_cg_keycode_to_win_key(0x75), Some((0x2E, 0x53, true))); // ForwardDelete
+        assert_eq!(macos_cg_keycode_to_win_key(0x7B), Some((0x25, 0x4B, true))); // Left
+        assert_eq!(macos_cg_keycode_to_win_key(0x7E), Some((0x26, 0x48, true))); // Up
+
+        // 1:1 modifiers with accurate Set 1 scancodes + extended
+        assert_eq!(macos_cg_keycode_to_win_key(0x38), Some((0xA0, 0x2A, false))); // LShift
+        assert_eq!(macos_cg_keycode_to_win_key(0x3C), Some((0xA1, 0x36, false))); // RShift
+        assert_eq!(macos_cg_keycode_to_win_key(0x3B), Some((0xA2, 0x1D, false))); // LControl
+        assert_eq!(macos_cg_keycode_to_win_key(0x3E), Some((0xA3, 0x1D, true))); // RControl
+        assert_eq!(macos_cg_keycode_to_win_key(0x3A), Some((0xA4, 0x38, false))); // LOption -> LAlt
+        assert_eq!(macos_cg_keycode_to_win_key(0x3D), Some((0xA5, 0x38, true))); // ROption -> RAlt
+        assert_eq!(macos_cg_keycode_to_win_key(0x37), Some((0x5B, 0x5B, true))); // LCommand -> LWin
+        assert_eq!(macos_cg_keycode_to_win_key(0x36), Some((0x5C, 0x5C, true))); // RCommand -> RWin
+        assert_eq!(macos_cg_keycode_to_win_key(0x39), Some((0x14, 0x3A, false))); // CapsLock
+        assert_eq!(macos_cg_keycode_to_win_key(0x69), Some((0x7C, 0x00, false))); // F13 uses VK
+
+        // Unknown / consumer code
+        assert_eq!(macos_cg_keycode_to_win_key(0xFF), None);
+    }
+
+    #[test]
+    fn macos_modifier_tracker_handles_sides_fallback_capslock_and_emergency() {
+        use macos_logic::{
+            is_emergency_release_combo, MacTapModifierTracker, ModifierAction,
+            KCG_FLAG_ALPHA_SHIFT, KCG_FLAG_CONTROL, KCG_FLAG_DEV_LCTRL, KCG_FLAG_DEV_LOPT,
+            KCG_FLAG_DEV_LSHIFT, KCG_FLAG_DEV_RSHIFT, KCG_FLAG_OPTION, KCG_FLAG_SHIFT,
+        };
+
+        let mut mods = MacTapModifierTracker::default();
+        // LShift down with device mask
+        assert_eq!(
+            mods.on_flags_changed(0x38, KCG_FLAG_SHIFT | KCG_FLAG_DEV_LSHIFT),
+            ModifierAction::Key {
+                vk: 0xA0,
+                scan: 0x2A,
+                is_down: true,
+                extended: false,
+            }
+        );
+        // RShift down while LShift stays down
+        assert_eq!(
+            mods.on_flags_changed(
+                0x3C,
+                KCG_FLAG_SHIFT | KCG_FLAG_DEV_LSHIFT | KCG_FLAG_DEV_RSHIFT
+            ),
+            ModifierAction::Key {
+                vk: 0xA1,
+                scan: 0x36,
+                is_down: true,
+                extended: false,
+            }
+        );
+        // Release LShift only -> RShift stays down!
+        assert_eq!(
+            mods.on_flags_changed(0x38, KCG_FLAG_SHIFT | KCG_FLAG_DEV_RSHIFT),
+            ModifierAction::Key {
+                vk: 0xA0,
+                scan: 0x2A,
+                is_down: false,
+                extended: false,
+            }
+        );
+        // Release RShift via generic-flag fallback (no lower device bits)
+        assert_eq!(
+            mods.on_flags_changed(0x3C, 0),
+            ModifierAction::Key {
+                vk: 0xA1,
+                scan: 0x36,
+                is_down: false,
+                extended: false,
+            }
+        );
+
+        // CapsLock AlphaShift flip emits toggle pulse
+        assert_eq!(
+            mods.on_flags_changed(0x39, KCG_FLAG_ALPHA_SHIFT),
+            ModifierAction::TogglePulse {
+                vk: 0x14,
+                scan: 0x3A,
+            }
+        );
+        assert_eq!(
+            mods.on_flags_changed(0x39, KCG_FLAG_ALPHA_SHIFT),
+            ModifierAction::None
+        );
+        assert_eq!(
+            mods.on_flags_changed(0x39, 0),
+            ModifierAction::TogglePulse {
+                vk: 0x14,
+                scan: 0x3A,
+            }
+        );
+
+        // Ctrl + Option + Esc emergency release vs Scroll/Pause
+        assert_eq!(
+            mods.on_flags_changed(0x3B, KCG_FLAG_CONTROL | KCG_FLAG_DEV_LCTRL),
+            ModifierAction::Key {
+                vk: 0xA2,
+                scan: 0x1D,
+                is_down: true,
+                extended: false,
+            }
+        );
+        assert_eq!(
+            mods.on_flags_changed(
+                0x3A,
+                KCG_FLAG_CONTROL | KCG_FLAG_DEV_LCTRL | KCG_FLAG_OPTION | KCG_FLAG_DEV_LOPT
+            ),
+            ModifierAction::Key {
+                vk: 0xA4,
+                scan: 0x38,
+                is_down: true,
+                extended: false,
+            }
+        );
+        assert!(mods.ctrl_and_option_down());
+        assert!(is_emergency_release_combo(0x1B, true, true));
+        assert!(!is_emergency_release_combo(0x1B, false, true)); // Cmd+Opt+Esc does NOT trigger
+        assert!(is_emergency_release_combo(0x91, false, false)); // Scroll Lock
+        assert!(is_emergency_release_combo(0x13, false, false)); // Pause
+    }
+
+    #[test]
+    fn macos_delta_tracker_drops_prewarp_edge_event_and_accumulates_fractions() {
+        use macos_logic::MacTapDeltaTracker;
+
+        let mut dt = MacTapDeltaTracker::default();
+        dt.engage((864.0, 558.0), (1727.0, 500.0));
+
+        // Pre-warp buffered edge event within 25ms is dropped cleanly
+        assert_eq!(dt.on_moved((1727.0, 502.0), 5), None);
+
+        // First settled sub-pixel micro moves accumulate cleanly without double counting
+        assert_eq!(dt.on_moved((864.4, 558.4), 30), Some((0, 0, false)));
+        assert_eq!(dt.on_moved((864.8, 558.8), 32), Some((0, 0, false)));
+        // Third step reaches 1.2 cumulative and warps back to center
+        assert_eq!(dt.on_moved((865.2, 559.2), 34), Some((1, 1, true)));
+        // Next move relative to warped center carries 0.2 remainder
+        assert_eq!(dt.on_moved((864.9, 558.9), 36), Some((1, 1, true)));
+    }
+
+    #[test]
+    fn macos_scroll_and_button_mapping() {
+        use macos_logic::{
+            cg_button_to_kvm, is_point_on_local_display, MacTapScrollAccumulator,
+            KCG_EVENT_LEFT_MOUSE_DOWN, KCG_EVENT_LEFT_MOUSE_UP, KCG_EVENT_OTHER_MOUSE_DOWN,
+            KCG_EVENT_OTHER_MOUSE_UP, KCG_EVENT_RIGHT_MOUSE_DOWN,
+        };
+
+        let mut scroll = MacTapScrollAccumulator::default();
+        assert_eq!(scroll.push(true, 10, 0), 30);
+        assert_eq!(scroll.push(true, 40, 0), 120);
+        assert_eq!(scroll.push(false, 0, 1), 120);
+        assert_eq!(scroll.push(false, 0, -2), -240);
+
+        assert_eq!(
+            cg_button_to_kvm(KCG_EVENT_LEFT_MOUSE_DOWN, 0),
+            Some((1, true))
+        );
+        assert_eq!(
+            cg_button_to_kvm(KCG_EVENT_LEFT_MOUSE_UP, 0),
+            Some((1, false))
+        );
+        assert_eq!(
+            cg_button_to_kvm(KCG_EVENT_RIGHT_MOUSE_DOWN, 1),
+            Some((2, true))
+        );
+        assert_eq!(
+            cg_button_to_kvm(KCG_EVENT_OTHER_MOUSE_DOWN, 2),
+            Some((3, true))
+        );
+        assert_eq!(
+            cg_button_to_kvm(KCG_EVENT_OTHER_MOUSE_UP, 2),
+            Some((3, false))
+        );
+        assert_eq!(cg_button_to_kvm(KCG_EVENT_OTHER_MOUSE_DOWN, 3), None);
+
+        let mons = vec![MonitorDisplay {
+            id: "cg-1".into(),
+            device_name: "cg-1".into(),
+            x: 0,
+            y: 0,
+            width: 1728,
+            height: 1117,
+            is_primary: true,
+        }];
+        assert!(is_point_on_local_display((1727, 500), &mons));
+        assert!(!is_point_on_local_display((1728, 500), &mons));
     }
     // --- end SPEC-25a ---
 }

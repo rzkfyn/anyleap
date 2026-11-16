@@ -28,10 +28,10 @@ AnyLeap connects your Android phone and Windows PCs over USB or local Wi-Fi in a
 - **USB & Wireless Pairing** — Plug in over USB or pair wirelessly via QR code or 6-digit mDNS pairing code with saved devices and live battery telemetry.
 
 ### Shared Mouse & Keyboard
-- **Main PC & Linked PC Roles (`Computers` tab)** — Clear role model: the **Main PC** (Windows) shares its physical mouse and keyboard; a **Linked PC** (Windows, or macOS via `SPEC-28` Accessibility-backed input/display adapters) opts in via **Allow other PCs to control this PC**.
+- **Main PC & Linked PC Roles (`Computers` tab)** — Clear role model: the **Main PC** (Windows, or macOS via `SPEC-29` `CGEventTap` adapters) shares its physical mouse and keyboard; a **Linked PC** (Windows, or macOS via `SPEC-28` Accessibility-backed input/display adapters) opts in via **Allow other PCs to control this PC**.
 - **Encrypted QUIC Link** — Mutually authenticated QUIC transport (UDP 4177) with unreliable datagrams for low-latency pointer motion and audio, plus separate unidirectional streams for clipboard text/images and file transfers.
 - **One-Time Pairing Code & Fingerprint Trust** — First link verifies a 6-digit **Pairing code**; subsequent links authenticate automatically by pinned SHA-256 certificate fingerprint (revoke anytime with **Forget**).
-- **Offset-Aware 2D Layout** — Multi-monitor canvas to position the Linked PC along any screen edge (`left`, `right`, `top`, `bottom`) with pixel-offset alignment, edge deadzone/dwell tuning, and instant cursor release (`Scroll Lock`, `Pause`, `Ctrl+Alt+Esc`, or **Bring cursor back**).
+- **Offset-Aware 2D Layout** — Multi-monitor canvas to position the Linked PC along any screen edge (`left`, `right`, `top`, `bottom`) with pixel-offset alignment, edge deadzone/dwell tuning, and instant cursor release (`Scroll Lock`, `Pause`, `Ctrl+Alt+Esc` / `Ctrl+Option+Esc` on macOS, or **Bring cursor back**).
 - **Continuity — Cross-PC File Copy-Paste & Drag & Drop** — Copy and paste files between Main PC and Linked PC (auto-prefetched up to 100 MB by default; larger transfers wait for the **Fetch** button above, with **Cancel** on both PCs and a live **transfer bar**). Cross-PC drag & drop is available as **(Experimental, off by default)**.
 - **Continuity — Audio Bridge & Media Keys** — Stream Linked PC audio to the Main PC with a volume slider and optional Linked-speaker mute (using Windows process loopback so bridged audio doesn't echo), while media and volume keys automatically follow whichever PC produced active audio.
 - **Continuity — Session Sync, Open on Linked PC & Pointer Sync** — Optionally lock or sleep both PCs together (unlock is never automated), right-click files in Explorer (**Open on Linked PC**, under *Show more options* on Windows 11) or run **Open URL on Linked PC** from the Command Palette (including typing a URL directly), and optionally sync the Main PC's pointer scheme to the Linked PC.
@@ -48,9 +48,9 @@ AnyLeap connects your Android phone and Windows PCs over USB or local Wi-Fi in a
 
 ## Requirements
 
-- **PC:** Windows 10 or Windows 11 (x64) with Microsoft Edge WebView2 Runtime (preinstalled on Windows 11 and most Windows 10 systems); macOS builds from source can run Android mirroring (external scrcpy window) and act as a **Linked PC** (`SPEC-28`, requires **Privacy & Security → Accessibility** permission).
+- **PC:** Windows 10 or Windows 11 (x64) with Microsoft Edge WebView2 Runtime (preinstalled on Windows 11 and most Windows 10 systems); macOS builds from source can run Android mirroring (external scrcpy window) and act as either a **Main PC** (`SPEC-29`) or **Linked PC** (`SPEC-28`, requiring **Privacy & Security → Accessibility** and **Input Monitoring** for Main PC).
 - **Android:** Phone with **USB debugging** enabled (Android 11+ recommended for wireless QR/pairing-code setup and audio forwarding).
-- **Shared Mouse & Keyboard:** Two PCs running AnyLeap on the same local network (Windows Main PC ↔ Windows or macOS Linked PC; UDP 4177 for QUIC, UDP 4179 for LAN discovery).
+- **Shared Mouse & Keyboard:** Two PCs running AnyLeap on the same local network (Windows or macOS Main PC ↔ Windows or macOS Linked PC; UDP 4177 for QUIC, UDP 4179 for LAN discovery).
 
 ## Install
 

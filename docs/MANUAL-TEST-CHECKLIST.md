@@ -110,6 +110,17 @@ Single-PC check that QUIC-injected keys reach a focused Win32 `EDIT` control on 
 - [ ] **Pointer, drag & double-click:** Moving across the Mac desktop moves smoothly (`CGWarpMouseCursorPosition` + `MouseMoved`), dragging windows/selections holds cleanly (`LeftMouseDragged`), and double-clicking files in Finder opens them (`ClickState = 2`).
 - [ ] **Scroll wheel:** Vertical mouse wheel scrolling on the Windows Main PC scrolls macOS windows in the expected direction and at usable speed.
 - [ ] **Keyboard & 1:1 modifiers:** Typing letters, numbers, punctuation, arrows, `Backspace`/`Delete`, `Return`, and `Win+C`/`Win+V` (`Command+C`/`Command+V`), `Alt+Left` (`Option+Left`), `Ctrl+Tab` (`Control+Tab`), and `Shift+Arrow` works without stuck modifiers after `CursorReturn` or **Bring cursor back**.
-- [ ] **File transfer path & Main PC guard:** File sends from Windows Main PC save into `~/Downloads/AnyLeap_Transfers` (not `.`), and attempting to connect from macOS as Main PC emits a single non-blocking notice without reporting `controller_edge` as active.
+- [ ] **File transfer path & Main PC guard:** File sends from Windows Main PC save into `~/Downloads/AnyLeap_Transfers` (not `.`), and attempting to connect from macOS without Accessibility permission emits a clear permission notice without reporting `controller_edge` as active.
+
+---
+
+## G. macOS Main PC (SPEC-29) — needs macOS Main PC + Windows/macOS Linked PC
+
+- [ ] **Permissions & controller status:** Connecting from macOS as Main PC with Accessibility (and Input Monitoring if prompted) enabled activates `controller_edge` (`TopologyCanvas` shows active seam), whereas denying Accessibility emits a non-blocking `kvm-continuity-notice` and keeps `controller_edge` null.
+- [ ] **Background app isolation:** With Safari, Xcode, or Finder focused on macOS, pushing the mouse across a configured seam traps input cleanly on the Mac (clicks, trackpad gestures, and keystrokes do not hit local macOS windows underneath).
+- [ ] **Trackpad micro-motion & fast flicks:** Slow sub-point trackpad moves and fast mouse sweeps across the Linked PC move smoothly without phantom full-screen jumps on leap engage (`MacTapDeltaTracker` settle guard).
+- [ ] **Continuous & discrete scroll:** Trackpad two-finger scroll and USB mouse wheel scroll smoothly on the Linked PC.
+- [ ] **Keyboard, modifiers & shortcuts:** Typing text, arrow keys, `Return`, `Backspace`, `Delete` (`Fn+Backspace`), `CapsLock`, and 1:1 shortcuts (`Command+C`/`Command+V` → `Win` or Mac `Command`, `Option+Tab` → `Alt+Tab`, `Control+C` → `Ctrl+C`, holding Left/Right `Shift`) works with zero stuck keys after returning.
+- [ ] **Emergency release & CursorReturn:** Pressing `Control+Option+Esc` immediately releases trap, restores the local cursor, clears remote modifiers, and updates UI; returning across the Linked PC seam warps the macOS cursor cleanly back to the matching edge coordinate `(rx, ry)`.
 
 

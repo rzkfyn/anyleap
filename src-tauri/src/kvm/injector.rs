@@ -20,12 +20,34 @@ pub const CURSOR_FLAG_SUPPRESSED: u32 = 0x0000_0002;
 #[cfg(windows)]
 const DESKTOP_READOBJECTS_ACCESS: u32 = 0x0001;
 
+#[cfg(any(target_os = "macos", test))]
+pub const ANYLEAP_CG_USER_DATA: i64 = 0x414E_594C_4B56_4D31;
+
+#[cfg(any(target_os = "macos", test))]
+pub fn is_self_injected_cg_user_data(user_data: i64) -> bool {
+    user_data == ANYLEAP_CG_USER_DATA
+}
+
 /// Returns whether the process holds macOS Accessibility trust required for `CGEventPost`.
 /// On non-macOS targets, always returns `true`.
 pub fn check_accessibility_permission(prompt: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
         macos_input::check_accessibility_permission(prompt)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = prompt;
+        true
+    }
+}
+
+/// Returns whether the process holds macOS Input Monitoring access for global event taps.
+/// On non-macOS targets, always returns `true`.
+pub fn check_input_monitoring_permission(prompt: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_input::check_input_monitoring_permission(prompt)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -871,6 +893,9 @@ mod macos_input {
     extern "C" {
         fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
         fn CGEventSourceSetLocalEventsSuppressionInterval(source: CGEventSourceRef, seconds: f64);
+        fn CGEventSourceSetUserData(source: CGEventSourceRef, user_data: i64);
+        fn CGPreflightListenEventAccess() -> bool;
+        fn CGRequestListenEventAccess() -> bool;
         fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
         fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
         fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> CGError;
@@ -916,6 +941,7 @@ mod macos_input {
                 let src = CGEventSourceCreate(K_CG_EVENT_SOURCE_STATE_PRIVATE);
                 if !src.is_null() {
                     CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0);
+                    CGEventSourceSetUserData(src, super::ANYLEAP_CG_USER_DATA);
                 }
                 EventSourcePtr(src)
             })
@@ -958,6 +984,18 @@ mod macos_input {
             let trusted = AXIsProcessTrustedWithOptions(dict) != 0;
             CFRelease(dict);
             trusted
+        }
+    }
+
+    pub fn check_input_monitoring_permission(prompt: bool) -> bool {
+        unsafe {
+            if CGPreflightListenEventAccess() {
+                return true;
+            }
+            if !prompt {
+                return false;
+            }
+            CGRequestListenEventAccess()
         }
     }
 
@@ -1278,5 +1316,13 @@ mod tests {
             macos_mouse_move_event_type(4),
             (KCG_EVENT_OTHER_MOUSE_DRAGGED, KCG_MOUSE_BUTTON_CENTER)
         );
+    }
+
+    #[test]
+    fn self_injected_cg_user_data_tag_matches_exact_magic_only() {
+        assert!(is_self_injected_cg_user_data(ANYLEAP_CG_USER_DATA));
+        assert!(!is_self_injected_cg_user_data(0));
+        assert!(!is_self_injected_cg_user_data(-1));
+        assert!(!is_self_injected_cg_user_data(ANYLEAP_CG_USER_DATA ^ 1));
     }
 }

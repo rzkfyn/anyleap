@@ -117,7 +117,7 @@ A Linux or macOS port will need to implement the following seams:
 
 | Seam | Current Windows Implementation | Location |
 |---|---|---|
-| **Input capture hooks** | `WH_MOUSE_LL`, `WH_KEYBOARD_LL`, `SetCursorPos`, `ClipCursor` | `src-tauri/src/kvm/hooks.rs`, `src-tauri/src/wheel_swipe.rs` |
+| **Input capture hooks** | `WH_MOUSE_LL`, `WH_KEYBOARD_LL`, `SetCursorPos`, `ClipCursor` (macOS Main PC: Quartz `CGEventTap`, `SPEC-29`) | `src-tauri/src/kvm/hooks.rs`, `src-tauri/src/wheel_swipe.rs` |
 | **Input injection** | Win32 `SendInput` (macOS Linked PC: CoreGraphics `CGEventPost` / `CGWarpMouseCursorPosition`, `SPEC-28`) | `src-tauri/src/kvm/injector.rs` |
 | **Cursor control & pointer scheme** | Cursor hiding/clipping & Registry/Win32 cursor schemes | `src-tauri/src/kvm/hooks.rs`, `src-tauri/src/kvm/cursor_scheme.rs` |
 | **Monitor enumeration** | `EnumDisplayMonitors`, `GetMonitorInfoW` (macOS: `CGGetActiveDisplayList` / `CGDisplayBounds`, `SPEC-28`) | `src-tauri/src/kvm/monitors.rs` |
