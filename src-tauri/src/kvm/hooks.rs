@@ -564,7 +564,7 @@ impl HookController {
         packet_tx: mpsc::Sender<KvmPacket>,
         delta_tx: mpsc::Sender<(i32, i32)>,
         on_leap_blocked: Option<LeapBlockedCallback>,
-    ) {
+    ) -> bool {
         let monitors = get_local_monitors();
         let local_union = union_rect(&monitors);
         LOCAL_UNION_X.store(local_union.x, Ordering::Relaxed);
@@ -691,89 +691,98 @@ impl HookController {
             *g = on_leap_blocked;
         }
 
-        if HOOK_ACTIVE.swap(true, Ordering::SeqCst) {
-            return;
+        #[cfg(not(windows))]
+        {
+            // Global input capture hooks are not yet implemented outside Windows.
+            // Keep HOOK_ACTIVE and HAS_ACTIVE_LINK false so status reflects reality.
+            HAS_ACTIVE_LINK.store(false, Ordering::Release);
+            false
         }
 
         #[cfg(windows)]
         {
+            if HOOK_ACTIVE.swap(true, Ordering::SeqCst) {
+                return true;
+            }
+
             LAST_BLOCKED_NOTICE_MS.store(0, Ordering::Relaxed);
             LAST_TIMER_BLOCKED_NOTICE_MS.store(0, Ordering::Relaxed);
             HAS_LAST_HOOK_TICK.store(false, Ordering::Release);
             LAST_HOOK_TICK_MS.store(0, Ordering::Release);
             LAST_MOUSE_HOOK_US.store(0, Ordering::Relaxed);
             LAST_KBD_HOOK_US.store(0, Ordering::Relaxed);
-        }
 
-        #[cfg(windows)]
-        std::thread::spawn(move || unsafe {
-            let mut msg = MSG::default();
-            // Force message queue creation before publishing HOOK_THREAD_ID so
-            // PostThreadMessageW from a hook callback never races queue init.
-            let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+            std::thread::spawn(move || unsafe {
+                let mut msg = MSG::default();
+                // Force message queue creation before publishing HOOK_THREAD_ID so
+                // PostThreadMessageW from a hook callback never races queue init.
+                let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
 
-            let tid = GetCurrentThreadId();
-            HOOK_THREAD_ID.store(tid, Ordering::Release);
-            let our_pid = GetCurrentProcessId();
+                let tid = GetCurrentThreadId();
+                HOOK_THREAD_ID.store(tid, Ordering::Release);
+                let our_pid = GetCurrentProcessId();
 
-            let h_mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0);
-            let h_kbd = SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0);
-            let mut watchdog_timer_id: usize = SetTimer(None, 0, WATCHDOG_INTERVAL_MS, None);
+                let h_mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), None, 0);
+                let h_kbd =
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), None, 0);
+                let mut watchdog_timer_id: usize = SetTimer(None, 0, WATCHDOG_INTERVAL_MS, None);
 
-            while HOOK_ACTIVE.load(Ordering::Relaxed) {
-                let res = GetMessageW(&mut msg, None, 0, 0);
-                if res.0 <= 0 {
-                    break;
-                }
-                if msg.message == WM_KVM_RESTORE_CURSOR {
-                    restore_cursor_visibility();
-                    continue;
-                }
-                if msg.message == WM_KVM_ENGAGE {
-                    if perform_engage_leap() && watchdog_timer_id == 0 {
-                        watchdog_timer_id = SetTimer(None, 0, WATCHDOG_INTERVAL_MS, None);
+                while HOOK_ACTIVE.load(Ordering::Relaxed) {
+                    let res = GetMessageW(&mut msg, None, 0, 0);
+                    if res.0 <= 0 {
+                        break;
                     }
-                    continue;
-                }
-                if msg.message == WM_TIMER
-                    && watchdog_timer_id != 0
-                    && msg.wParam.0 == watchdog_timer_id
-                {
-                    if IS_TRAPPED.load(Ordering::Acquire) {
-                        if let Some(last_input_tick) = query_last_input_tick() {
-                            let hook_tick = HAS_LAST_HOOK_TICK
-                                .load(Ordering::Acquire)
-                                .then(|| LAST_HOOK_TICK_MS.load(Ordering::Acquire));
-                            if let Some(gap_ms) = evaluate_capture_watchdog(
-                                true,
-                                hook_tick,
-                                last_input_tick,
-                                WATCHDOG_BLIND_THRESHOLD_MS,
-                            ) {
-                                perform_watchdog_release(gap_ms);
-                            }
+                    if msg.message == WM_KVM_RESTORE_CURSOR {
+                        restore_cursor_visibility();
+                        continue;
+                    }
+                    if msg.message == WM_KVM_ENGAGE {
+                        if perform_engage_leap() && watchdog_timer_id == 0 {
+                            watchdog_timer_id = SetTimer(None, 0, WATCHDOG_INTERVAL_MS, None);
                         }
-                    } else if HAS_ACTIVE_LINK.load(Ordering::Acquire) {
-                        check_timer_elevated_leap_block(our_pid);
+                        continue;
                     }
-                    continue;
+                    if msg.message == WM_TIMER
+                        && watchdog_timer_id != 0
+                        && msg.wParam.0 == watchdog_timer_id
+                    {
+                        if IS_TRAPPED.load(Ordering::Acquire) {
+                            if let Some(last_input_tick) = query_last_input_tick() {
+                                let hook_tick = HAS_LAST_HOOK_TICK
+                                    .load(Ordering::Acquire)
+                                    .then(|| LAST_HOOK_TICK_MS.load(Ordering::Acquire));
+                                if let Some(gap_ms) = evaluate_capture_watchdog(
+                                    true,
+                                    hook_tick,
+                                    last_input_tick,
+                                    WATCHDOG_BLIND_THRESHOLD_MS,
+                                ) {
+                                    perform_watchdog_release(gap_ms);
+                                }
+                            }
+                        } else if HAS_ACTIVE_LINK.load(Ordering::Acquire) {
+                            check_timer_elevated_leap_block(our_pid);
+                        }
+                        continue;
+                    }
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
                 }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
 
-            if watchdog_timer_id != 0 {
-                let _ = KillTimer(None, watchdog_timer_id);
-            }
-            if let Ok(hook) = h_mouse {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            if let Ok(hook) = h_kbd {
-                let _ = UnhookWindowsHookEx(hook);
-            }
-            HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-            restore_cursor_visibility();
-        });
+                if watchdog_timer_id != 0 {
+                    let _ = KillTimer(None, watchdog_timer_id);
+                }
+                if let Ok(hook) = h_mouse {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                if let Ok(hook) = h_kbd {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+                HOOK_THREAD_ID.store(0, Ordering::SeqCst);
+                restore_cursor_visibility();
+            });
+            true
+        }
     }
 
     pub fn stop_hooks(&self) {
@@ -2469,6 +2478,19 @@ mod tests {
         assert!(!HookController::can_engage_drag_leap(
             true, true, false, true, 0
         ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn start_hooks_on_non_windows_leaves_hooks_inactive() {
+        let controller = HookController::new();
+        let (pkt_tx, _pkt_rx) = mpsc::channel(4);
+        let (delta_tx, _delta_rx) = mpsc::channel(4);
+        let started = controller.start_hooks(TopologyConfig::default(), pkt_tx, delta_tx, None);
+        assert!(!started);
+        assert!(!controller.is_active());
+        assert_eq!(controller.active_link_edge(), None);
+        controller.stop_hooks();
     }
     // --- end SPEC-25a ---
 }

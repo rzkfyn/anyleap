@@ -25,6 +25,9 @@ const KVM_PORT: u16 = 4177;
 
 /// Receiver side: a remote controller currently drives this PC's cursor (UI status only).
 static RECEIVER_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WARNED_UNSUPPORTED_CONTROLLER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CACHED_COMPUTER_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 struct ReceiverSessionState {
     is_entered: bool,
@@ -109,14 +112,24 @@ fn release_receiver_inputs(rx_state: &Arc<Mutex<ReceiverSessionState>>, reason: 
     }
 }
 
-fn get_download_dir() -> std::path::PathBuf {
-    std::env::var("USERPROFILE")
+fn resolve_download_dir(userprofile: Option<&str>, home: Option<&str>) -> std::path::PathBuf {
+    userprofile
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .or_else(|| home.map(str::trim).filter(|p| !p.is_empty()))
         .map(|p| {
             std::path::PathBuf::from(p)
                 .join("Downloads")
                 .join("AnyLeap_Transfers")
         })
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn get_download_dir() -> std::path::PathBuf {
+    resolve_download_dir(
+        std::env::var("USERPROFILE").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
 }
 
 /// Identity + trust store, created on first use under the app data dir.
@@ -1504,15 +1517,62 @@ fn compute_linked_drag_return(
 }
 // --- end SPEC-25a ---
 
+fn resolve_computer_name_from_sources(
+    computername: Option<&str>,
+    os_name: Option<&str>,
+    hostname_env: Option<&str>,
+    unix_hostname: Option<&str>,
+) -> String {
+    for cand in [computername, os_name, hostname_env, unix_hostname] {
+        if let Some(name) = cand.map(str::trim).filter(|s| !s.is_empty()) {
+            return name.to_string();
+        }
+    }
+    "AnyLeap-PC".to_string()
+}
+
+fn local_computer_name() -> String {
+    CACHED_COMPUTER_NAME
+        .get_or_init(|| {
+            let computername = std::env::var("COMPUTERNAME").ok();
+            let hostname_env = std::env::var("HOSTNAME").ok();
+            #[cfg(target_os = "macos")]
+            let os_name = std::process::Command::new("scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+            #[cfg(not(target_os = "macos"))]
+            let os_name: Option<String> = None;
+
+            #[cfg(unix)]
+            let unix_hostname = std::process::Command::new("hostname")
+                .args(["-s"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+            #[cfg(not(unix))]
+            let unix_hostname: Option<String> = None;
+
+            resolve_computer_name_from_sources(
+                computername.as_deref(),
+                os_name.as_deref(),
+                hostname_env.as_deref(),
+                unix_hostname.as_deref(),
+            )
+        })
+        .clone()
+}
+
 fn get_local_machine_info(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(String, String, i32, i32, Vec<MonitorDisplay>), String> {
     let (identity, _) = get_security(app, state)?;
     let id = identity.computer_id();
-    let name = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "AnyLeap-PC".to_string());
+    let name = local_computer_name();
     let monitors = get_local_monitors();
     let union = union_rect(&monitors);
     let primary = monitors
@@ -1636,6 +1696,7 @@ fn disconnect_client_in_state(kvm: &mut KvmState) {
         client.conn.close(0u32.into(), b"disconnect");
     }
     kvm.hooks.stop_hooks();
+    WARNED_UNSUPPORTED_CONTROLLER.store(false, std::sync::atomic::Ordering::Release);
     // --- SPEC-25b ---
     super::audio::on_main_disconnected();
     // --- /SPEC-25b ---
@@ -1817,6 +1878,13 @@ async fn start_server_inner(
         get_download_dir(),
     )
     .await?;
+    #[cfg(target_os = "macos")]
+    if !injector::check_accessibility_permission(true) {
+        emit_continuity_notice(
+            app_handle,
+            "Accessibility permission is required to receive remote mouse and keyboard input. Enable AnyLeap in System Settings → Privacy & Security → Accessibility.",
+        );
+    }
     let port = server_handle.port;
     let mut rx = server_handle.incoming_tx.subscribe();
     let mut transfer_rx = server_handle.transfer_tx.subscribe();
@@ -3556,8 +3624,17 @@ fn apply_controller_topology(kvm: &mut KvmState, topology: TopologyConfig, app_h
         super::dragdrop::set_edge_catcher_poll_state(false, false);
         super::dragdrop::configure_edge_catcher(main_strips, Some(on_main_drag_caught));
         // --- end SPEC-25a ---
-        kvm.hooks
-            .start_hooks(topology, packet_tx, delta_tx, Some(on_leap_blocked));
+        let hooks_started =
+            kvm.hooks
+                .start_hooks(topology, packet_tx, delta_tx, Some(on_leap_blocked));
+        if !hooks_started
+            && !WARNED_UNSUPPORTED_CONTROLLER.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            emit_continuity_notice(
+                app_handle,
+                "Main PC input capture is not supported on this OS yet. This machine can still act as a Linked PC.",
+            );
+        }
     }
 }
 
@@ -4292,5 +4369,55 @@ mod tests {
             true,
             now + Duration::from_millis(350)
         ));
+    }
+
+    #[test]
+    fn resolve_download_dir_prefers_userprofile_then_home_then_dot() {
+        assert_eq!(
+            resolve_download_dir(Some(r"C:\Users\Alice"), Some("/home/alice")),
+            std::path::PathBuf::from(r"C:\Users\Alice")
+                .join("Downloads")
+                .join("AnyLeap_Transfers")
+        );
+        assert_eq!(
+            resolve_download_dir(Some("  "), Some("/Users/alice")),
+            std::path::PathBuf::from("/Users/alice")
+                .join("Downloads")
+                .join("AnyLeap_Transfers")
+        );
+        assert_eq!(
+            resolve_download_dir(None, None),
+            std::path::PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn resolve_computer_name_uses_platform_fallbacks() {
+        assert_eq!(
+            resolve_computer_name_from_sources(
+                Some("DESKTOP-WIN"),
+                Some("My Mac"),
+                Some("host"),
+                Some("short")
+            ),
+            "DESKTOP-WIN"
+        );
+        assert_eq!(
+            resolve_computer_name_from_sources(
+                None,
+                Some("MacBook Pro\n"),
+                Some("host"),
+                Some("short")
+            ),
+            "MacBook Pro"
+        );
+        assert_eq!(
+            resolve_computer_name_from_sources(None, Some("  "), None, Some("macbook\n")),
+            "macbook"
+        );
+        assert_eq!(
+            resolve_computer_name_from_sources(None, None, None, None),
+            "AnyLeap-PC"
+        );
     }
 }

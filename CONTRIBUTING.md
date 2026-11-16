@@ -118,9 +118,9 @@ A Linux or macOS port will need to implement the following seams:
 | Seam | Current Windows Implementation | Location |
 |---|---|---|
 | **Input capture hooks** | `WH_MOUSE_LL`, `WH_KEYBOARD_LL`, `SetCursorPos`, `ClipCursor` | `src-tauri/src/kvm/hooks.rs`, `src-tauri/src/wheel_swipe.rs` |
-| **Input injection** | Win32 `SendInput` | `src-tauri/src/kvm/injector.rs` |
+| **Input injection** | Win32 `SendInput` (macOS Linked PC: CoreGraphics `CGEventPost` / `CGWarpMouseCursorPosition`, `SPEC-28`) | `src-tauri/src/kvm/injector.rs` |
 | **Cursor control & pointer scheme** | Cursor hiding/clipping & Registry/Win32 cursor schemes | `src-tauri/src/kvm/hooks.rs`, `src-tauri/src/kvm/cursor_scheme.rs` |
-| **Monitor enumeration** | `EnumDisplayMonitors`, `GetMonitorInfoW` | `src-tauri/src/kvm/monitors.rs` |
+| **Monitor enumeration** | `EnumDisplayMonitors`, `GetMonitorInfoW` (macOS: `CGGetActiveDisplayList` / `CGDisplayBounds`, `SPEC-28`) | `src-tauri/src/kvm/monitors.rs` |
 | **Clipboard formats & drag-and-drop** | `WM_CLIPBOARDUPDATE`, `CF_UNICODETEXT`/`CF_DIB`/`CF_HDROP`, layered edge catcher & OLE `DoDragDrop` | `src-tauri/src/kvm/clipboard.rs`, `src-tauri/src/kvm/dragdrop.rs` |
 | **Audio capture/playback & media keys** | WASAPI `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`, `IAudioEndpointVolume::SetMute`, session activity & media key injection | `src-tauri/src/kvm/audio.rs`, `src-tauri/src/kvm/media_keys.rs` |
 | **Session lock & sleep events** | `WM_WTSSESSION_CHANGE`, `WM_POWERBROADCAST`, `LockWorkStation`, `SetSuspendState` | `src-tauri/src/kvm/session_sync.rs` |

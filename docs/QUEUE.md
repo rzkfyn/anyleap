@@ -32,7 +32,7 @@ spec drafted → spec approved → implementation (Orca worker) → verified (te
 | 11 | Phone hub | SPEC-27 | queued | **Next.** Queued after SPEC-25 continuity work. |
 | 5 | Native virtual webcam (Media Foundation) | SPEC-15 | queued | Windows 11 only; phone camera AND Linked PC webcam. Existing spec. |
 | 6 | PC display streaming | SPEC-13 | queued | Reuse the QUIC connection from #1 (SPEC-19). |
-| 13 | Cross-platform Linux/macOS input adapters | — | blocked | Blocked on contributors/testers; Windows first. |
+| 13 | Cross-platform Linux/macOS input adapters | SPEC-28 | in-progress | macOS Linked PC (`monitors.rs` + `injector.rs`, `SPEC-28`) implemented pending two-PC hardware verification; macOS Main PC hooks (`CGEventTap`) and Linux adapters remain open. |
 | 14 | Android companion app (notification replies, SMS, calls, QUIC link reusing SPEC-19 pairing) | — | queued | Long-term post-v1.0.0. |
 
 ## Out of scope (requires an Android companion app)

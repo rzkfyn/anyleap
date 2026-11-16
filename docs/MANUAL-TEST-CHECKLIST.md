@@ -100,3 +100,16 @@ Single-PC check that QUIC-injected keys reach a focused Win32 `EDIT` control on 
    ```
 4. Options: `--scenario` (`basic`, `hud` [<=50 ms while HUD toast appears], `reenter`, `after-click`, or `all`), `--repeat <N>`, `--delay-ms <MS>`, `--addr <IP:PORT>`. Prints per-step foreground HWND/process and a summary table; exits non-zero on any `FAIL`.
 
+---
+
+## F. macOS Linked PC (SPEC-28) — needs Windows Main PC + macOS Linked PC
+
+- [ ] **Discovery & identity:** Enabling **Allow other PCs to control this PC** on macOS advertises the Mac's computer name (not `"AnyLeap-PC"`) and enumerates active CoreGraphics displays (`cg-<id>`) in logical points.
+- [ ] **Accessibility TCC flow:** When Accessibility is not yet granted, enabling **Allow other PCs to control this PC** triggers the macOS Accessibility prompt and displays the `kvm-continuity-notice` toast without failing server startup.
+- [ ] **Pairing & layout:** Windows Main PC pairs via 6-digit Pairing code, renders the Mac's monitors (including multi-monitor Retina + external arrangement) accurately in `TopologyCanvas`, and leaps/returns across shared seams.
+- [ ] **Pointer, drag & double-click:** Moving across the Mac desktop moves smoothly (`CGWarpMouseCursorPosition` + `MouseMoved`), dragging windows/selections holds cleanly (`LeftMouseDragged`), and double-clicking files in Finder opens them (`ClickState = 2`).
+- [ ] **Scroll wheel:** Vertical mouse wheel scrolling on the Windows Main PC scrolls macOS windows in the expected direction and at usable speed.
+- [ ] **Keyboard & 1:1 modifiers:** Typing letters, numbers, punctuation, arrows, `Backspace`/`Delete`, `Return`, and `Win+C`/`Win+V` (`Command+C`/`Command+V`), `Alt+Left` (`Option+Left`), `Ctrl+Tab` (`Control+Tab`), and `Shift+Arrow` works without stuck modifiers after `CursorReturn` or **Bring cursor back**.
+- [ ] **File transfer path & Main PC guard:** File sends from Windows Main PC save into `~/Downloads/AnyLeap_Transfers` (not `.`), and attempting to connect from macOS as Main PC emits a single non-blocking notice without reporting `controller_edge` as active.
+
+

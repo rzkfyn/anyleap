@@ -37,6 +37,7 @@ SHA-256 (hex) of a peer's self-signed certificate DER. Pinned at PIN pairing and
 The spatial transition mechanism that lets a cursor move seamlessly between PCs across touching monitor boundaries:
 - **Remote Origin (`remote_origin`)**: Optional `Point { x, y }` placement of the Linked PC's virtual-desktop origin `(0, 0)` inside the Main PC's virtual-desktop coordinates (physical px). Supersedes single-edge `TopologyLink` offsets (and auto-migrates from legacy links when absent).
 - **Seam (`Seam` / `LinkedSeam`)**: A strictly positive overlapping segment where a Main PC monitor edge touches a Linked PC monitor edge with zero gap and zero overlap. Controller leaps (`CursorEnter`) and receiver returns (`CursorReturn`) trigger only across active seams (with per-seam `dwell_ms` and end-of-seam `deadzone_px`) and carry `target_monitor` (`device_name`) and `along_px` (local pixel coordinate along the target monitor's entry edge). Crossing an uncovered edge clamps inside the local desktop.
+- **macOS Linked PC Adapter (`SPEC-28`)**: CoreGraphics display enumeration (`cg-<CGDirectDisplayID>` in Global Display logical points via `CGDisplayBounds`) paired with Quartz/ApplicationServices input injection (`CGEventPost` move/drag/button/click-state/scroll/key events, 1:1 `Win → Command`, `Alt → Option`, `Ctrl → Control` modifier mapping, and `AXIsProcessTrustedWithOptions` Accessibility trust checks).
 
 ### Continuity (`SPEC-25`)
 Cross-PC workstation continuity features layered over the authenticated QUIC link (Windows):
