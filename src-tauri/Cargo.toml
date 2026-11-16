@@ -88,6 +88,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "remote_desktop", "screencast"] }
 reis = { version = "0.7", features = ["tokio"] }
+futures-util = "0.3"
 x11rb = { version = "0.14", features = ["randr", "xtest"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
 rustix = { version = "1", features = ["fs"] }

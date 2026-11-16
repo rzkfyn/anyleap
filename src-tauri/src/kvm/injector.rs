@@ -2365,7 +2365,7 @@ mod linux_input {
     }
 
     fn connect_x11() -> Result<LinuxBackend, String> {
-        use x11rb::connection::RequestConnection as _;
+        use x11rb::connection::{Connection as _, RequestConnection as _};
         use x11rb::protocol::xtest;
 
         if std::env::var_os("DISPLAY").is_none() {
